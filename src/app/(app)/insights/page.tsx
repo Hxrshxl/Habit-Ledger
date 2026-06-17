@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useAppData } from "@/components/AppDataProvider";
 import {
   Habit, Entry, Experiment, buildEntryMap, monthRange, statForRange,
   gradeOf, weekdayMatrix, pairLift, localToday, parseDate, addDays, fmt, pad,
@@ -15,32 +16,42 @@ interface Ev { id: number; at: string; kind: string; detail: string }
 export default function InsightsPage() {
   const today = localToday();
   const now = parseDate(today);
-  const [habits, setHabits] = useState<Habit[]>([]);
+  const { habits: allHabits, appLoading } = useAppData();
+  const habits = allHabits.filter(h => !h.archived);
+
   const [entries, setEntries] = useState<Entry[]>([]);
   const [exps, setExps] = useState<Experiment[]>([]);
   const [events, setEvents] = useState<Ev[]>([]);
   const [coach, setCoach] = useState<string>("");
   const [coachBusy, setCoachBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [dataLoading, setDataLoading] = useState(true);
+  const loading = appLoading || dataLoading;
   const [expForm, setExpForm] = useState({ name: "", habit_id: 0, a_label: "Condition A", a_from: "", a_to: "", b_label: "Condition B", b_from: "", b_to: "" });
 
   const load = useCallback(async () => {
+    setDataLoading(true);
     try {
-      const [hs, es, xs, evs] = await Promise.all([
-        jget<Habit[]>("/api/habits"),
+      const [es, xs, evs] = await Promise.all([
         jget<Entry[]>(`/api/entries?from=${fmt(addDays(now, -90))}&to=${today}`),
         jget<Experiment[]>("/api/experiments"),
         jget<Ev[]>("/api/events"),
       ]);
-      setHabits(hs); setEntries(es); setExps(xs); setEvents(evs); setErr("");
-      if (hs.length && !expForm.habit_id) setExpForm((f) => ({ ...f, habit_id: hs[0].id }));
+      setEntries(es); setExps(xs); setEvents(evs); setErr("");
     } catch (e) { setErr((e as Error).message); }
-    setLoading(false);
+    setDataLoading(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // Set default habit for experiment form once habits arrive from context
+  useEffect(() => {
+    if (habits.length && !expForm.habit_id) {
+      setExpForm(f => ({ ...f, habit_id: habits[0].id }));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [habits.length]);
 
   const emap = useMemo(() => buildEntryMap(entries), [entries]);
   const last90from = fmt(addDays(now, -89));

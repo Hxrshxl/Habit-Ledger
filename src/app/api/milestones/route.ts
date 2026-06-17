@@ -8,7 +8,9 @@ export async function GET(req: NextRequest) {
   const milestones = goalId
     ? await listMilestones(Number(goalId))
     : await listMilestones();
-  return NextResponse.json(milestones);
+  return NextResponse.json(milestones, {
+    headers: { "Cache-Control": "private, max-age=30, stale-while-revalidate=300" },
+  });
 }
 
 export async function POST(req: NextRequest) {

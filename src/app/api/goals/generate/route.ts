@@ -27,9 +27,9 @@ interface GeminiPlan {
 }
 
 export async function POST(req: NextRequest) {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    return NextResponse.json({ error: "GEMINI_API_KEY not configured." }, { status: 503 });
+    return NextResponse.json({ error: "ANTHROPIC_API_KEY not configured." }, { status: 503 });
   }
 
   const b = await req.json().catch(() => null);
@@ -84,30 +84,30 @@ Guidelines:
 - All content must be specific to THIS goal — no generic advice
 - Return nothing except the JSON object`;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
-
   let raw: string;
   try {
-    const res = await fetch(url, {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 4096,
-          responseMimeType: "application/json",
-        },
+        model: "claude-sonnet-4-6",
+        max_tokens: 4096,
+        messages: [{ role: "user", content: prompt }],
       }),
+      signal: AbortSignal.timeout(30000),
     });
     if (!res.ok) {
       const err = await res.text().catch(() => "");
-      return NextResponse.json({ error: `Gemini API error: ${res.status} ${err.slice(0, 200)}` }, { status: 502 });
+      return NextResponse.json({ error: `Claude API error: ${res.status} ${err.slice(0, 200)}` }, { status: 502 });
     }
     const data = await res.json();
-    raw = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    raw = (data?.content ?? []).filter((c: { type: string }) => c.type === "text").map((c: { text: string }) => c.text).join("") ?? "";
   } catch (e) {
-    return NextResponse.json({ error: `Failed to reach Gemini: ${(e as Error).message}` }, { status: 502 });
+    return NextResponse.json({ error: `Failed to reach Claude: ${(e as Error).message}` }, { status: 502 });
   }
 
   let plan: GeminiPlan;

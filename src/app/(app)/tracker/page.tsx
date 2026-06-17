@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useAppData } from "@/components/AppDataProvider";
 import {
   Habit, Entry, Goal, Milestone, buildEntryMap, ekey, eachDay, isScheduled, monthRange,
   statForRange, computeStreakBatch, localToday, weekdayOf, parseDate, addDays, fmt, categoryColor,
@@ -45,17 +46,17 @@ export default function TrackerPage() {
   const now = parseDate(today);
   const [year, setYear] = useState(now.getFullYear());
   const [month0, setMonth0] = useState(now.getMonth());
-  const [habits, setHabits] = useState<Habit[]>([]);
+  const { habits, goals, milestones, appLoading, refresh: refreshData } = useAppData();
+
   const [entries, setEntries] = useState<Entry[]>([]);
   const [allEntries, setAllEntries] = useState<Entry[]>([]);
-  const [goals,      setGoals]      = useState<Pick<Goal, "id" | "name">[]>([]);
-  const [milestones, setMilestones] = useState<Pick<Milestone, "id" | "goal_id" | "title">[]>([]);
   const [mode, setMode] = useState<Mode>("mark");
   const [form, setForm] = useState<HabitForm | null>(null);
   const [showArchived, setShowArchived] = useState(false);
   const [menuOpen, setMenuOpen] = useState<number | null>(null);
   const [err, setErr] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [entriesLoading, setEntriesLoading] = useState(true);
+  const loading = appLoading || entriesLoading;
   const [confirmDelete, setConfirmDelete] = useState<Habit | null>(null);
   const [nlText,    setNlText]    = useState("");
   const [nlParsing, setNlParsing] = useState(false);
@@ -74,19 +75,19 @@ export default function TrackerPage() {
     return () => document.removeEventListener("mousedown", close);
   }, [menuOpen]);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (refreshHabits = false) => {
+    setEntriesLoading(true);
     try {
-      const [hs, es, all, gs, ms] = await Promise.all([
-        jget<Habit[]>(`/api/habits?all=1`),
-        jget<Entry[]>(`/api/entries?from=${from}&to=${to}`),
-        jget<Entry[]>(`/api/entries?from=${twoYearsAgo}&to=${today}`),
-        jget<Pick<Goal, "id" | "name">[]>(`/api/goals`),
-        jget<Pick<Milestone, "id" | "goal_id" | "title">[]>(`/api/milestones`),
-      ]);
-      setHabits(hs); setEntries(es); setAllEntries(all); setGoals(gs); setMilestones(ms); setErr("");
+      const fetches: Promise<unknown>[] = [
+        jget<Entry[]>(`/api/entries?from=${from}&to=${to}`).then(setEntries),
+        jget<Entry[]>(`/api/entries?from=${twoYearsAgo}&to=${today}`).then(setAllEntries),
+      ];
+      if (refreshHabits) fetches.push(refreshData());
+      await Promise.all(fetches);
+      setErr("");
     } catch (e) { setErr((e as Error).message); }
-    setLoading(false);
-  }, [from, to, twoYearsAgo, today]);
+    setEntriesLoading(false);
+  }, [from, to, twoYearsAgo, today, refreshData]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -162,7 +163,7 @@ export default function TrackerPage() {
     const j = i + dir;
     if (j < 0 || j >= ids.length) return;
     [ids[i], ids[j]] = [ids[j], ids[i]];
-    try { await jsend("/api/habits/reorder", "POST", { ids }); await load(); } catch (e) { setErr((e as Error).message); }
+    try { await jsend("/api/habits/reorder", "POST", { ids }); await load(true); } catch (e) { setErr((e as Error).message); }
   }
 
   function openEdit(h?: Habit) {
@@ -199,12 +200,12 @@ export default function TrackerPage() {
     try {
       if (form.id) await jsend(`/api/habits/${form.id}`, "PATCH", body);
       else await jsend(`/api/habits`, "POST", body);
-      setForm(null); await load();
+      setForm(null); await load(true);
     } catch (e) { setErr((e as Error).message); }
   }
 
   async function archive(h: Habit) {
-    try { await jsend(`/api/habits/${h.id}`, "PATCH", { archived: h.archived ? 0 : 1 }); await load(); } catch (e) { setErr((e as Error).message); }
+    try { await jsend(`/api/habits/${h.id}`, "PATCH", { archived: h.archived ? 0 : 1 }); await load(true); } catch (e) { setErr((e as Error).message); }
   }
 
   async function remove(h: Habit) {
@@ -215,7 +216,7 @@ export default function TrackerPage() {
     if (!confirmDelete) return;
     const h = confirmDelete;
     setConfirmDelete(null);
-    try { await jsend(`/api/habits/${h.id}`, "DELETE"); await load(); } catch (e) { setErr((e as Error).message); }
+    try { await jsend(`/api/habits/${h.id}`, "DELETE"); await load(true); } catch (e) { setErr((e as Error).message); }
   }
 
   const dayTotals = useMemo(() => days.map((d) => {
@@ -282,7 +283,7 @@ export default function TrackerPage() {
         why:            nlPreview.why,
       });
       setNlText(""); setNlPreview(null); setNlErr("");
-      await load();
+      await load(true);
     } catch (e) { setNlErr((e as Error).message); }
     setNlParsing(false);
   }

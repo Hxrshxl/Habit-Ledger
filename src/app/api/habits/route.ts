@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 export async function GET(req: NextRequest) {
   const all = req.nextUrl.searchParams.get("all") === "1";
   return NextResponse.json(await listHabits(all), {
-    headers: { "Cache-Control": "private, max-age=10, stale-while-revalidate=60" },
+    headers: { "Cache-Control": "private, max-age=30, stale-while-revalidate=300" },
   });
 }
 

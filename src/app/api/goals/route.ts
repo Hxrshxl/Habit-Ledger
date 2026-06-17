@@ -4,7 +4,9 @@ import { listGoals, createGoal } from "@/lib/db";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  return NextResponse.json(await listGoals());
+  return NextResponse.json(await listGoals(), {
+    headers: { "Cache-Control": "private, max-age=30, stale-while-revalidate=300" },
+  });
 }
 
 export async function POST(req: NextRequest) {

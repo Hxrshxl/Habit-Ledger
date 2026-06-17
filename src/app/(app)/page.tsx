@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { useAppData } from "@/components/AppDataProvider";
 import Link from "next/link";
 import {
   Habit, Entry, Goal, Milestone, WeeklyReview, buildEntryMap, ekey, isScheduled, localToday,
@@ -184,13 +185,14 @@ export default function Dashboard() {
   const today  = localToday();
   const yearAgo = fmt(addDays(parseDate(today), -365));
 
-  const [habits,       setHabits]       = useState<Habit[]>([]);
+  const { habits: allHabits, goals, milestones, appLoading, refresh: refreshData } = useAppData();
+  const habits = allHabits.filter(h => !h.archived);
+
   const [entries,      setEntries]      = useState<Entry[]>([]);
-  const [goals,        setGoals]        = useState<Goal[]>([]);
-  const [milestones,   setMilestones]   = useState<Milestone[]>([]);
   const [lastReview,   setLastReview]   = useState<WeeklyReview | null>(null);
-  const [loading,      setLoading]      = useState(true);
+  const [entriesLoading, setEntriesLoading] = useState(true);
   const [err,          setErr]          = useState("");
+  const loading = appLoading || entriesLoading;
 
   // add-habit panel
   const [showAdd, setShowAdd] = useState(false);
@@ -199,21 +201,17 @@ export default function Dashboard() {
   const [addOk,   setAddOk]   = useState("");
 
   const load = useCallback(async () => {
-    setLoading(true); setErr("");
+    setEntriesLoading(true); setErr("");
     try {
-      // Last week's Monday for the review reminder
       const lastMonday = fmt(addDays(parseDate(weekKey(today)), -7));
-      const [h, e, g, ms, rv] = await Promise.all([
-        jget<Habit[]>("/api/habits"),
+      const [e, rv] = await Promise.all([
         jget<Entry[]>(`/api/entries?from=${yearAgo}&to=${today}`),
-        jget<Goal[]>("/api/goals"),
-        jget<Milestone[]>("/api/milestones"),
         jget<WeeklyReview | null>(`/api/reviews?week=${lastMonday}`),
       ]);
-      setHabits(h); setEntries(e); setGoals(g); setMilestones(ms);
+      setEntries(e);
       setLastReview(rv ?? null);
     } catch (e) { setErr(e instanceof Error ? e.message : "Couldn't load."); }
-    setLoading(false);
+    setEntriesLoading(false);
   }, [today, yearAgo]);
 
   useEffect(() => { load(); }, [load]);
@@ -322,7 +320,7 @@ export default function Dashboard() {
       setShowAdd(false);
       setAddOk(`"${af.name.trim()}" added!`);
       setTimeout(() => setAddOk(""), 3000);
-      await load();
+      await Promise.all([refreshData(), load()]);
     } catch (e) { setAddErr(e instanceof Error ? e.message : "Failed to add habit."); }
   }
 

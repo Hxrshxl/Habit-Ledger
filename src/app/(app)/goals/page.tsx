@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useAppData } from "@/components/AppDataProvider";
 import Link from "next/link";
 import {
   Habit, Entry, Goal, Milestone,
@@ -252,12 +253,18 @@ const STATUSES   = ["active", "completed", "paused", "stalled"];
 export default function GoalsPage() {
   const today = localToday();
 
-  const [goals,    setGoals]    = useState<Goal[]>([]);
-  const [msList,   setMsList]   = useState<Milestone[]>([]);
-  const [habits,   setHabits]   = useState<Habit[]>([]);
+  const {
+    habits: allHabits,
+    goals, setGoals,
+    milestones: msList, setMilestones: setMsList,
+    appLoading, refresh: refreshData,
+  } = useAppData();
+  const habits = allHabits.filter(h => !h.archived);
+
   const [entries,  setEntries]  = useState<Entry[]>([]);
-  const [loading,  setLoading]  = useState(true);
+  const [entriesLoading, setEntriesLoading] = useState(true);
   const [err,      setErr]      = useState("");
+  const loading = appLoading || entriesLoading;
 
   // Forms
   const [goalForm, setGoalForm] = useState<GoalFormState | null>(null);
@@ -268,17 +275,13 @@ export default function GoalsPage() {
   const [confirmMsId, setConfirmMsId] = useState<number | null>(null);
 
   const load = useCallback(async () => {
+    setEntriesLoading(true);
     try {
       const from = fmt(addDays(parseDate(today), -365));
-      const [gs, ms, hs, es] = await Promise.all([
-        jget<Goal[]>("/api/goals"),
-        jget<Milestone[]>("/api/milestones"),
-        jget<Habit[]>("/api/habits"),
-        jget<Entry[]>(`/api/entries?from=${from}&to=${today}`),
-      ]);
-      setGoals(gs); setMsList(ms); setHabits(hs); setEntries(es); setErr("");
+      const es = await jget<Entry[]>(`/api/entries?from=${from}&to=${today}`);
+      setEntries(es); setErr("");
     } catch (e) { setErr((e as Error).message); }
-    setLoading(false);
+    setEntriesLoading(false);
   }, [today]);
 
   useEffect(() => { load(); }, [load]);
@@ -316,7 +319,7 @@ export default function GoalsPage() {
         });
       }
       setGoalForm(null);
-      await load();
+      await refreshData();
     } catch (e) { setErr((e as Error).message); }
     setSaving(false);
   }
@@ -340,7 +343,7 @@ export default function GoalsPage() {
     } finally {
       setDeleting((prev) => { const s = new Set(prev); s.delete(g.id); return s; });
     }
-    await load();
+    await refreshData();
   }
 
   // ── Milestone CRUD ─────────────────────────────────────────────────────────
@@ -369,7 +372,7 @@ export default function GoalsPage() {
         });
       }
       setMsForm(null);
-      await load();
+      await refreshData();
     } catch (e) { setErr((e as Error).message); }
     setSaving(false);
   }

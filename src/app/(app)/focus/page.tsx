@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useAppData } from "@/components/AppDataProvider";
 import Link from "next/link";
 import {
   Habit, Entry, Goal, Milestone,
@@ -127,26 +128,21 @@ export default function FocusPage() {
   const today  = localToday();
   const weekStart = weekKey(today);
 
-  const [habits,     setHabits]     = useState<Habit[]>([]);
+  const { habits: allHabits, goals, milestones, appLoading } = useAppData();
+  const habits = allHabits.filter(h => !h.archived);
+
   const [entries,    setEntries]    = useState<Entry[]>([]);
-  const [goals,      setGoals]      = useState<Goal[]>([]);
-  const [milestones, setMilestones] = useState<Milestone[]>([]);
-  const [loading,    setLoading]    = useState(true);
+  const [entriesLoading, setEntriesLoading] = useState(true);
   const [err,        setErr]        = useState("");
+  const loading = appLoading || entriesLoading;
 
   const load = useCallback(async () => {
-    setLoading(true);
+    setEntriesLoading(true);
     try {
-      const weekFrom = fmt(addDays(parseDate(today), -1)); // yesterday for streak check
-      const [hs, es, gs, ms] = await Promise.all([
-        jget<Habit[]>("/api/habits"),
-        jget<Entry[]>(`/api/entries?from=${weekStart}&to=${today}`),
-        jget<Goal[]>("/api/goals"),
-        jget<Milestone[]>("/api/milestones"),
-      ]);
-      setHabits(hs); setEntries(es); setGoals(gs); setMilestones(ms); setErr("");
+      const es = await jget<Entry[]>(`/api/entries?from=${weekStart}&to=${today}`);
+      setEntries(es); setErr("");
     } catch (e) { setErr((e as Error).message); }
-    setLoading(false);
+    setEntriesLoading(false);
   }, [today, weekStart]);
 
   useEffect(() => { load(); }, [load]);

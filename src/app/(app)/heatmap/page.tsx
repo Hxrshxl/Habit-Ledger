@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Habit, Entry, buildEntryMap, ekey, eachDay, isScheduled, localToday, parseDate, weekdayOf, categoryColor } from "@/lib/core";
+import { Entry, buildEntryMap, ekey, eachDay, isScheduled, localToday, parseDate, weekdayOf, categoryColor } from "@/lib/core";
 import { jget } from "@/lib/client";
+import { useAppData } from "@/components/AppDataProvider";
 
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
@@ -55,20 +56,21 @@ function Heat({ year, value }: { year: number; value: (date: string) => { ratio:
 export default function HeatmapPage() {
   const today = localToday();
   const [year, setYear] = useState(parseDate(today).getFullYear());
-  const [habits, setHabits] = useState<Habit[]>([]);
+  const { habits: allHabits, appLoading } = useAppData();
+  const habits = allHabits.filter(h => !h.archived);
+
   const [entries, setEntries] = useState<Entry[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [entriesLoading, setEntriesLoading] = useState(true);
   const [err, setErr] = useState("");
+  const loading = appLoading || entriesLoading;
 
   const load = useCallback(async () => {
+    setEntriesLoading(true);
     try {
-      const [hs, es] = await Promise.all([
-        jget<Habit[]>("/api/habits"),
-        jget<Entry[]>(`/api/entries?from=${year}-01-01&to=${year}-12-31`),
-      ]);
-      setHabits(hs); setEntries(es); setErr("");
+      const es = await jget<Entry[]>(`/api/entries?from=${year}-01-01&to=${year}-12-31`);
+      setEntries(es); setErr("");
     } catch (e) { setErr((e as Error).message); }
-    setLoading(false);
+    setEntriesLoading(false);
   }, [year]);
 
   useEffect(() => { load(); }, [load]);
