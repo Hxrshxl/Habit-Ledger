@@ -240,7 +240,7 @@ export default function InsightsPage() {
       {/* AI coach */}
       <div className="card stack">
         <div className="section-title">AI coach</div>
-        <div className="muted small">Sends your last 30 days of stats (numbers only) to Claude and returns 3 specific suggestions. Requires ANTHROPIC_API_KEY in .env.local.</div>
+        <div className="muted small">Sends your last 30 days of stats (numbers only) to Gemini and returns 3 specific suggestions. Requires GEMINI_API_KEY in .env.local.</div>
         <div><button className="btn btn-sm" onClick={runCoach} disabled={coachBusy}>{coachBusy ? "Thinking…" : "Get coaching"}</button></div>
         {coach && <div className="section" style={{ whiteSpace: "pre-wrap" }}>{coach}</div>}
       </div>

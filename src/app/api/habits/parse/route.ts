@@ -15,8 +15,8 @@ interface ParsedHabit {
 }
 
 export async function POST(req: NextRequest) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return NextResponse.json({ error: "ANTHROPIC_API_KEY not configured." }, { status: 503 });
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return NextResponse.json({ error: "GEMINI_API_KEY not configured." }, { status: 503 });
 
   const b = await req.json().catch(() => null);
   const text = String(b?.text ?? "").trim();
@@ -74,29 +74,24 @@ Return nothing except the JSON object.`;
 
   let raw: string;
   try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 512,
-        messages: [{ role: "user", content: prompt }],
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+        signal: AbortSignal.timeout(15000),
+      }
+    );
     if (!res.ok) {
       const err = await res.text().catch(() => "");
-      console.error("[parse] Claude error", res.status, err.slice(0, 400));
-      return NextResponse.json({ error: `Claude error: ${res.status} ${err.slice(0, 200)}` }, { status: 502 });
+      console.error("[parse] Gemini error", res.status, err.slice(0, 400));
+      return NextResponse.json({ error: `Gemini API error: ${res.status} ${err.slice(0, 200)}` }, { status: 502 });
     }
     const data = await res.json();
-    raw = (data?.content ?? []).filter((c: { type: string }) => c.type === "text").map((c: { text: string }) => c.text).join("") ?? "";
+    raw = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
   } catch (e) {
-    return NextResponse.json({ error: `Failed to reach Claude: ${(e as Error).message}` }, { status: 502 });
+    return NextResponse.json({ error: `Failed to reach Gemini: ${(e as Error).message}` }, { status: 502 });
   }
 
   let parsed: ParsedHabit;

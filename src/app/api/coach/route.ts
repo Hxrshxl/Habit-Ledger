@@ -7,10 +7,10 @@ import {
 export const dynamic = "force-dynamic";
 
 export async function POST() {
-  const key = process.env.ANTHROPIC_API_KEY;
+  const key = process.env.GEMINI_API_KEY;
   if (!key)
     return NextResponse.json(
-      { error: "AI coach is off. Set ANTHROPIC_API_KEY in your environment and restart to enable it." },
+      { error: "AI coach is off. Set GEMINI_API_KEY in your environment and restart to enable it." },
       { status: 400 }
     );
 
@@ -31,23 +31,21 @@ export async function POST() {
     `avg mood ${avg(ctx.map((c) => c.mood!).filter((x) => x != null))}/5`
   );
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 500,
-      messages: [{
-        role: "user",
-        content:
-          `You are a pragmatic habit coach. My last 30 days:\n\n${lines.join("\n")}\n\n` +
-          `Reply in under 130 words, plain text: 1) the biggest pattern, 2) weakest habit + one concrete fix, 3) one thing to keep doing.`,
-      }],
-    }),
-    signal: AbortSignal.timeout(20000),
-  });
+  const prompt =
+    `You are a pragmatic habit coach. My last 30 days:\n\n${lines.join("\n")}\n\n` +
+    `Reply in under 130 words, plain text: 1) the biggest pattern, 2) weakest habit + one concrete fix, 3) one thing to keep doing.`;
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+      signal: AbortSignal.timeout(20000),
+    }
+  );
   if (!res.ok) return NextResponse.json({ error: `Coach request failed (${res.status}).` }, { status: 502 });
   const data = await res.json();
-  const text = (data?.content ?? []).filter((c: { type: string }) => c.type === "text").map((c: { text: string }) => c.text).join("\n");
-  return NextResponse.json({ text });
+  const advice = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+  return NextResponse.json({ advice });
 }
