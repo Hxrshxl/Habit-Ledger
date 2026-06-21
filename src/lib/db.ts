@@ -1,307 +1,179 @@
-import { createClient, Client } from "@libsql/client";
-import path from "path";
-import fs from "fs";
+import { MongoClient, Db, ObjectId, Document } from "mongodb";
 import crypto from "crypto";
 import type { Habit, Entry, ContextDay, Goal, Milestone, Experiment, WeeklyReview } from "./core";
 
-// ── Singleton (survives Next.js hot-reload in dev) ──────────────────────────
+// ── Singleton (survives Next.js hot-reload in dev) ───────────────────────────
 declare global {
   // eslint-disable-next-line no-var
-  var __habitClient: Client | undefined;
+  var __mongoClient: MongoClient | undefined;
   // eslint-disable-next-line no-var
-  var __habitInit: Promise<void> | undefined;
+  var __dbInit: Promise<void> | undefined;
 }
 
-type SqlVal = string | number | bigint | null;
-
-function getClient(): Client {
-  if (!globalThis.__habitClient) {
-    const url = process.env.TURSO_DATABASE_URL ?? "file:./data/habits.db";
-    if (url.startsWith("file:")) {
-      const dataDir = path.join(process.cwd(), "data");
-      if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-    }
-    globalThis.__habitClient = createClient({
-      url,
-      authToken: process.env.TURSO_AUTH_TOKEN,
-    });
-    globalThis.__habitInit = initSchema(globalThis.__habitClient, url);
+async function getDb(): Promise<Db> {
+  if (!globalThis.__mongoClient) {
+    const uri = process.env.MONGODB_URI;
+    if (!uri) throw new Error("MONGODB_URI environment variable is not set");
+    const client = new MongoClient(uri);
+    globalThis.__mongoClient = client;
+    globalThis.__dbInit = client.connect().then(() => initDb(client.db("habit_ledger")));
   }
-  return globalThis.__habitClient;
+  await globalThis.__dbInit;
+  return globalThis.__mongoClient.db("habit_ledger");
 }
 
-// Returns an initialized client. After schema init resolves, subsequent
-// awaits on the same resolved promise are synchronous no-ops.
-async function db(): Promise<Client> {
-  const c = getClient();
-  await globalThis.__habitInit;
-  return c;
-}
-
-async function q<T>(sql: string, args: SqlVal[] = []): Promise<T[]> {
-  const c = await db();
-  const r = await c.execute({ sql, args: args as never });
-  return r.rows as unknown as T[];
-}
-
-async function q1<T>(sql: string, args: SqlVal[] = []): Promise<T | null> {
-  return (await q<T>(sql, args))[0] ?? null;
-}
-
-async function run(sql: string, args: SqlVal[] = []): Promise<{ changes: number; lastId: number }> {
-  const c = await db();
-  const r = await c.execute({ sql, args: args as never });
-  return { changes: r.rowsAffected, lastId: Number(r.lastInsertRowid ?? 0) };
-}
-
-async function batchRun(stmts: Array<{ sql: string; args: SqlVal[] }>): Promise<void> {
-  if (!stmts.length) return;
-  const c = await db();
-  await c.batch(stmts as never, "write");
-}
-
-// ── Schema & Seed ────────────────────────────────────────────────────────────
-
-async function initSchema(client: Client, url: string): Promise<void> {
-  // WAL + performance PRAGMAs apply only to local file-based SQLite
-  if (url.startsWith("file:")) {
-    for (const p of [
-      "PRAGMA journal_mode = WAL",
-      "PRAGMA synchronous   = NORMAL",
-      "PRAGMA cache_size    = -65536",
-      "PRAGMA mmap_size     = 268435456",
-      "PRAGMA temp_store    = MEMORY",
-    ]) {
-      try { await client.execute(p); } catch {}
-    }
-  }
-  try { await client.execute("PRAGMA foreign_keys = ON"); } catch {}
-
-  await client.executeMultiple(`
-    CREATE TABLE IF NOT EXISTS habits (
-      id              INTEGER PRIMARY KEY AUTOINCREMENT,
-      name            TEXT    NOT NULL,
-      category        TEXT    NOT NULL DEFAULT 'General',
-      goal            INTEGER NOT NULL DEFAULT 30,
-      frequency_type  TEXT    NOT NULL DEFAULT 'daily',
-      weekdays        TEXT    NOT NULL DEFAULT '',
-      times_per_week  INTEGER NOT NULL DEFAULT 3,
-      quantity_target INTEGER NOT NULL DEFAULT 0,
-      quantity_unit   TEXT    NOT NULL DEFAULT '',
-      verify_type     TEXT    NOT NULL DEFAULT 'manual',
-      verify_config   TEXT    NOT NULL DEFAULT '{}',
-      goal_id         INTEGER,
-      position        INTEGER NOT NULL DEFAULT 0,
-      archived        INTEGER NOT NULL DEFAULT 0,
-      created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+async function initDb(db: Db): Promise<void> {
+  await Promise.all([
+    db.collection("entries").createIndex({ habit_id: 1, date: 1 }, { unique: true }),
+    db.collection("entries").createIndex({ date: 1 }),
+    db.collection("daily_context").createIndex({ date: 1 }, { unique: true }),
+    db.collection("weekly_reviews").createIndex({ week_start: 1 }, { unique: true }),
+    db.collection("expense_budgets").createIndex({ month: 1, category: 1 }, { unique: true }),
+    db.collection("push_subscriptions").createIndex({ endpoint: 1 }, { unique: true }),
+    db.collection("settings").createIndex({ key: 1 }, { unique: true }),
+    db.collection("habits").createIndex({ position: 1, archived: 1 }),
+    db.collection("milestones").createIndex({ goal_id: 1, order_index: 1 }),
+    db.collection("jobs").createIndex({ status: 1 }),
+    db.collection("jobs").createIndex({ created_at: -1 }),
+    db.collection("daily_mits").createIndex({ date: 1 }, { unique: true }),
+    db.collection("reminders").createIndex({ enabled: 1, time: 1 }),
+  ]);
+  const seeded = await db.collection("settings").findOne({ key: "seeded" });
+  if (!seeded) {
+    const count = await db.collection("habits").countDocuments();
+    if (count === 0) await seedHabits(db);
+    await db.collection("settings").updateOne(
+      { key: "seeded" },
+      { $set: { key: "seeded", value: "1" } },
+      { upsert: true }
     );
-    CREATE TABLE IF NOT EXISTS entries (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
-      habit_id   INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
-      date       TEXT    NOT NULL,
-      status     TEXT    NOT NULL DEFAULT 'done',
-      quantity   INTEGER,
-      note       TEXT,
-      source     TEXT    NOT NULL DEFAULT 'manual',
-      created_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
-      UNIQUE (habit_id, date)
-    );
-    CREATE INDEX IF NOT EXISTS idx_entries_date ON entries(date);
-    CREATE TABLE IF NOT EXISTS daily_context (
-      date        TEXT PRIMARY KEY,
-      mood        INTEGER,
-      energy      INTEGER,
-      sleep_hours REAL
-    );
-    CREATE TABLE IF NOT EXISTS goals (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      name        TEXT NOT NULL,
-      description TEXT NOT NULL DEFAULT '',
-      target_date TEXT
-    );
-    CREATE TABLE IF NOT EXISTS experiments (
-      id       INTEGER PRIMARY KEY AUTOINCREMENT,
-      name     TEXT NOT NULL,
-      habit_id INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
-      a_label  TEXT NOT NULL, a_from TEXT NOT NULL, a_to TEXT NOT NULL,
-      b_label  TEXT NOT NULL, b_from TEXT NOT NULL, b_to TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS events (
-      id       INTEGER PRIMARY KEY AUTOINCREMENT,
-      ts       TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
-      type     TEXT NOT NULL,
-      habit_id INTEGER,
-      date     TEXT,
-      detail   TEXT NOT NULL DEFAULT '{}'
-    );
-    CREATE TABLE IF NOT EXISTS settings (
-      key   TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS expenses (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
-      date       TEXT    NOT NULL,
-      name       TEXT    NOT NULL,
-      amount     REAL    NOT NULL,
-      type       TEXT    NOT NULL DEFAULT 'expense',
-      category   TEXT    NOT NULL DEFAULT 'Other',
-      note       TEXT,
-      created_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
-    );
-    CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date);
-    CREATE TABLE IF NOT EXISTS expense_budgets (
-      id       INTEGER PRIMARY KEY AUTOINCREMENT,
-      month    TEXT    NOT NULL,
-      category TEXT    NOT NULL,
-      amount   REAL    NOT NULL,
-      UNIQUE(month, category)
-    );
-    CREATE TABLE IF NOT EXISTS weekly_reviews (
-      id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      week_start   TEXT    NOT NULL UNIQUE,
-      went_well    TEXT    NOT NULL DEFAULT '',
-      got_in_way   TEXT    NOT NULL DEFAULT '',
-      protect_time TEXT    NOT NULL DEFAULT '',
-      created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS milestones (
-      id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-      goal_id            INTEGER NOT NULL,
-      title              TEXT    NOT NULL,
-      explanation        TEXT    NOT NULL DEFAULT '',
-      estimated_duration TEXT    NOT NULL DEFAULT '',
-      order_index        INTEGER NOT NULL DEFAULT 0,
-      dependencies       TEXT    NOT NULL DEFAULT '[]',
-      success_criteria   TEXT    NOT NULL DEFAULT '',
-      status             TEXT    NOT NULL DEFAULT 'pending',
-      target_date        TEXT,
-      created_at         TEXT    NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS push_subscriptions (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
-      endpoint   TEXT    NOT NULL UNIQUE,
-      p256dh     TEXT    NOT NULL,
-      auth       TEXT    NOT NULL,
-      created_at TEXT    NOT NULL DEFAULT (datetime('now'))
-    );
-  `);
-
-  // Migrations run BEFORE indexes so migrated columns exist when indexes reference them
-  const mig = async (sql: string) => { try { await client.execute(sql); } catch {} };
-  // legacy goal columns
-  await mig("ALTER TABLE goals ADD COLUMN parent_id INTEGER");
-  await mig("ALTER TABLE goals ADD COLUMN created_at TEXT");
-  // new goal planning fields
-  await mig("ALTER TABLE goals ADD COLUMN category TEXT NOT NULL DEFAULT 'General'");
-  await mig("ALTER TABLE goals ADD COLUMN priority TEXT NOT NULL DEFAULT 'medium'");
-  await mig("ALTER TABLE goals ADD COLUMN timeframe TEXT NOT NULL DEFAULT 'custom'");
-  await mig("ALTER TABLE goals ADD COLUMN start_date TEXT");
-  await mig("ALTER TABLE goals ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
-  await mig("ALTER TABLE goals ADD COLUMN ai_context TEXT NOT NULL DEFAULT ''");
-  await mig("ALTER TABLE goals ADD COLUMN eisenhower TEXT");
-  // habit fields
-  await mig("ALTER TABLE habits ADD COLUMN why TEXT NOT NULL DEFAULT ''");
-  await mig("ALTER TABLE habits ADD COLUMN milestone_id INTEGER");
-  await mig("ALTER TABLE habits ADD COLUMN interval_days INTEGER NOT NULL DEFAULT 7");
-
-  await client.executeMultiple(`
-    CREATE INDEX IF NOT EXISTS idx_entries_habit_date   ON entries(habit_id, date);
-    CREATE INDEX IF NOT EXISTS idx_habits_goal_archived ON habits(goal_id, archived);
-    CREATE INDEX IF NOT EXISTS idx_habits_position      ON habits(archived, position);
-    CREATE INDEX IF NOT EXISTS idx_goals_parent         ON goals(parent_id);
-    CREATE INDEX IF NOT EXISTS idx_milestones_goal      ON milestones(goal_id);
-    CREATE INDEX IF NOT EXISTS idx_habits_milestone     ON habits(milestone_id);
-  `);
-
-  // One-time data migration: move old goals-as-milestones into the milestones table
-  await migrateLegacyMilestones(client);
-
-  if (url.startsWith("file:")) {
-    try { await client.execute("PRAGMA optimize"); } catch {}
-  }
-
-  await seedIfEmpty(client);
-}
-
-async function migrateLegacyMilestones(client: Client): Promise<void> {
-  // Move goals with parent_id != null to the milestones table, then delete them from goals.
-  // Already migrated rows have no matching goals.parent_id, so this is safe to re-run.
-  const legacy = await client.execute(
-    "SELECT id, name, description, target_date, parent_id, created_at FROM goals WHERE parent_id IS NOT NULL"
-  );
-  if (legacy.rows.length === 0) return;
-
-  for (const row of legacy.rows) {
-    const r = await client.execute({
-      sql: "INSERT INTO milestones (goal_id, title, explanation, target_date, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
-      args: [row.parent_id, row.name, row.description ?? "", row.target_date, row.created_at ?? new Date().toISOString()],
-    });
-    const newMsId = Number(r.lastInsertRowid ?? 0);
-    if (newMsId > 0) {
-      await client.execute({ sql: "UPDATE habits SET milestone_id = ? WHERE goal_id = ?", args: [newMsId, row.id] });
-    }
-    await client.execute({ sql: "DELETE FROM goals WHERE id = ?", args: [row.id] });
   }
 }
 
-async function seedIfEmpty(client: Client): Promise<void> {
-  const r = await client.execute("SELECT COUNT(*) AS c FROM habits");
-  if (Number(r.rows[0].c) > 0) return;
-
-  const defaults: Array<[string, number, string]> = [
-    ["Wake Up Early", 30, "Routine"],
-    ["DSA - Revision", 30, "Learning"],
-    ["DSA - 1", 30, "Learning"],
-    ["DSA - 2", 20, "Learning"],
-    ["DSA - 3", 30, "Learning"],
-    ["System Design - Revision", 30, "Learning"],
-    ["System Design - New", 30, "Learning"],
-    ["Drink 3L Water", 25, "Health"],
-    ["Track Expenses 💵", 30, "Finance"],
-    ["Skincare Routine ✨", 30, "Routine"],
+async function seedHabits(db: Db): Promise<void> {
+  const defaults = [
+    { name: "Wake Up Early", goal: 30, category: "Routine" },
+    { name: "DSA - Revision", goal: 30, category: "Learning" },
+    { name: "DSA - 1", goal: 30, category: "Learning" },
+    { name: "DSA - 2", goal: 20, category: "Learning" },
+    { name: "DSA - 3", goal: 30, category: "Learning" },
+    { name: "System Design - Revision", goal: 30, category: "Learning" },
+    { name: "System Design - New", goal: 30, category: "Learning" },
+    { name: "Drink 3L Water", goal: 25, category: "Health" },
+    { name: "Track Expenses 💵", goal: 30, category: "Finance" },
+    { name: "Skincare Routine ✨", goal: 30, category: "Routine" },
   ];
-
-  await client.batch(
-    defaults.map(([name, goal, cat], i) => ({
-      sql: "INSERT INTO habits (name, goal, category, position) VALUES (?, ?, ?, ?)",
-      args: [name, goal, cat, i],
-    })),
-    "write"
+  await db.collection("habits").insertMany(
+    defaults.map((d, i) => ({
+      ...d,
+      frequency_type: "daily",
+      weekdays: "",
+      times_per_week: 3,
+      quantity_target: 0,
+      quantity_unit: "",
+      verify_type: "manual",
+      verify_config: "{}",
+      goal_id: null,
+      milestone_id: null,
+      interval_days: 7,
+      position: i,
+      archived: 0,
+      why: "",
+      created_at: new Date().toISOString(),
+    }))
   );
 }
 
-// ── Events ───────────────────────────────────────────────────────────────────
+// ── Document → TypeScript converters ──────────────────────────────────────────
+
+function toOid(id: string): ObjectId {
+  try { return new ObjectId(id); } catch { throw new Error(`Invalid id: ${id}`); }
+}
+
+function docToHabit(doc: Document): Habit {
+  const { _id, ...rest } = doc;
+  return { pause_until: null, id: (_id as ObjectId).toString(), ...rest } as Habit;
+}
+
+function docToGoal(doc: Document): Goal {
+  const { _id, ...rest } = doc;
+  return { id: (_id as ObjectId).toString(), ...rest } as Goal;
+}
+
+function docToMilestone(doc: Document): Milestone {
+  const { _id, ...rest } = doc;
+  return { id: (_id as ObjectId).toString(), ...rest } as Milestone;
+}
+
+function docToEntry(doc: Document): Entry {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { _id, ...rest } = doc;
+  return rest as Entry;
+}
+
+function docToContext(doc: Document): ContextDay {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { _id, ...rest } = doc;
+  return rest as ContextDay;
+}
+
+function docToReview(doc: Document): WeeklyReview {
+  const { _id, ...rest } = doc;
+  return { id: (_id as ObjectId).toString(), ...rest } as WeeklyReview;
+}
+
+function docToExperiment(doc: Document): Experiment {
+  const { _id, ...rest } = doc;
+  return { id: (_id as ObjectId).toString(), ...rest } as Experiment;
+}
+
+// ── Events ────────────────────────────────────────────────────────────────────
 
 export async function logEvent(
-  type: string, habitId: number | null, date: string | null, detail: object
+  type: string, habitId: string | null, date: string | null, detail: object
 ): Promise<void> {
-  await run(
-    "INSERT INTO events (type, habit_id, date, detail) VALUES (?, ?, ?, ?)",
-    [type, habitId, date, JSON.stringify(detail)]
-  );
+  const db = await getDb();
+  await db.collection("events").insertOne({
+    at: new Date(),
+    kind: type,
+    habit_id: habitId,
+    date,
+    detail: JSON.stringify(detail),
+  });
 }
 
 export async function recentEvents(limit = 50) {
-  return q(
-    "SELECT id, ts, type, habit_id, date, detail FROM events ORDER BY id DESC LIMIT ?",
-    [Math.min(200, limit)]
-  );
+  const db = await getDb();
+  const docs = await db.collection("events")
+    .find({})
+    .sort({ _id: -1 })
+    .limit(Math.min(200, limit))
+    .toArray();
+  return docs.map((d) => ({
+    id: (d._id as ObjectId).toString(),
+    ts: d.at,
+    type: d.kind,
+    habit_id: d.habit_id,
+    date: d.date,
+    detail: d.detail,
+  }));
 }
 
 // ── Habits ────────────────────────────────────────────────────────────────────
 
-const HABIT_COLS =
-  "id, name, category, goal, frequency_type, weekdays, times_per_week, quantity_target, quantity_unit, verify_type, verify_config, goal_id, milestone_id, interval_days, position, archived, why";
-
 export async function listHabits(includeArchived = false): Promise<Habit[]> {
-  const sql = includeArchived
-    ? `SELECT ${HABIT_COLS} FROM habits ORDER BY position, id`
-    : `SELECT ${HABIT_COLS} FROM habits WHERE archived = 0 ORDER BY position, id`;
-  return q<Habit>(sql);
+  const db = await getDb();
+  const filter = includeArchived ? {} : { archived: 0 };
+  const docs = await db.collection("habits").find(filter).sort({ position: 1, _id: 1 }).toArray();
+  return docs.map(docToHabit);
 }
 
-export async function getHabit(id: number): Promise<Habit | null> {
-  return q1<Habit>(`SELECT ${HABIT_COLS} FROM habits WHERE id = ?`, [id]);
+export async function getHabit(id: string): Promise<Habit | null> {
+  const db = await getDb();
+  try {
+    const doc = await db.collection("habits").findOne({ _id: toOid(id) });
+    return doc ? docToHabit(doc) : null;
+  } catch { return null; }
 }
 
 export interface HabitInput {
@@ -316,91 +188,106 @@ export interface HabitInput {
   quantity_unit?: string;
   verify_type?: string;
   verify_config?: string;
-  goal_id?: number | null;
-  milestone_id?: number | null;
+  goal_id?: string | null;
+  milestone_id?: string | null;
   archived?: number;
   why?: string;
 }
 
 export async function createHabit(input: HabitInput): Promise<Habit> {
-  const posRow = await q1<{ m: number }>("SELECT COALESCE(MAX(position), -1) AS m FROM habits");
-  const maxPos = posRow?.m ?? -1;
-  const { lastId } = await run(
-    `INSERT INTO habits
-     (name, category, goal, frequency_type, weekdays, times_per_week,
-      quantity_target, quantity_unit, verify_type, verify_config, goal_id, milestone_id, interval_days, position, why)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      input.name,
-      input.category ?? "General",
-      input.goal ?? 30,
-      input.frequency_type ?? "daily",
-      input.weekdays ?? "",
-      input.times_per_week ?? 3,
-      input.quantity_target ?? 0,
-      input.quantity_unit ?? "",
-      input.verify_type ?? "manual",
-      input.verify_config ?? "{}",
-      input.goal_id ?? null,
-      input.milestone_id ?? null,
-      input.interval_days ?? 7,
-      maxPos + 1,
-      input.why ?? "",
-    ]
-  );
-  await logEvent("habit_created", lastId, null, { name: input.name });
-  return (await getHabit(lastId))!;
-}
+  const db = await getDb();
+  const maxDoc = await db.collection("habits")
+    .findOne({}, { sort: { position: -1 }, projection: { position: 1 } });
+  const maxPos = (maxDoc?.position as number | undefined) ?? -1;
 
-export async function updateHabit(id: number, input: Partial<HabitInput>): Promise<Habit | null> {
-  if (!await getHabit(id)) return null;
-  const allowed: Record<string, string> = {
-    name: "name", category: "category", goal: "goal", frequency_type: "frequency_type",
-    weekdays: "weekdays", times_per_week: "times_per_week", interval_days: "interval_days",
-    quantity_target: "quantity_target",
-    quantity_unit: "quantity_unit", verify_type: "verify_type", verify_config: "verify_config",
-    goal_id: "goal_id", milestone_id: "milestone_id", archived: "archived", why: "why",
+  const doc = {
+    name: input.name,
+    category: input.category ?? "General",
+    goal: input.goal ?? 30,
+    frequency_type: input.frequency_type ?? "daily",
+    weekdays: input.weekdays ?? "",
+    times_per_week: input.times_per_week ?? 3,
+    quantity_target: input.quantity_target ?? 0,
+    quantity_unit: input.quantity_unit ?? "",
+    verify_type: input.verify_type ?? "manual",
+    verify_config: input.verify_config ?? "{}",
+    goal_id: input.goal_id ?? null,
+    milestone_id: input.milestone_id ?? null,
+    interval_days: input.interval_days ?? 7,
+    position: maxPos + 1,
+    archived: 0,
+    why: input.why ?? "",
+    created_at: new Date().toISOString(),
   };
-  const stmts: Array<{ sql: string; args: SqlVal[] }> = [];
-  for (const [k, col] of Object.entries(allowed)) {
-    const v = (input as Record<string, unknown>)[k];
-    if (v !== undefined) stmts.push({ sql: `UPDATE habits SET ${col} = ? WHERE id = ?`, args: [v as SqlVal, id] });
+
+  const result = await db.collection("habits").insertOne(doc);
+  await logEvent("habit_created", result.insertedId.toString(), null, { name: input.name });
+  return (await getHabit(result.insertedId.toString()))!;
+}
+
+export async function updateHabit(id: string, input: Partial<HabitInput>): Promise<Habit | null> {
+  const db = await getDb();
+  const update: Record<string, unknown> = {};
+  const fields: (keyof HabitInput)[] = [
+    "name", "category", "goal", "frequency_type", "weekdays", "times_per_week",
+    "interval_days", "quantity_target", "quantity_unit", "verify_type", "verify_config",
+    "goal_id", "milestone_id", "archived", "why",
+  ];
+  for (const field of fields) {
+    if (input[field] !== undefined) update[field] = input[field];
   }
-  if (stmts.length) await batchRun(stmts);
-  await logEvent("habit_updated", id, null, input as object);
-  return getHabit(id);
+  if (Object.keys(update).length === 0) return getHabit(id);
+  try {
+    await db.collection("habits").updateOne({ _id: toOid(id) }, { $set: update });
+    await logEvent("habit_updated", id, null, input as object);
+    return getHabit(id);
+  } catch { return null; }
 }
 
-export async function reorderHabits(orderedIds: number[]): Promise<void> {
-  await batchRun(
-    orderedIds.map((id, i) => ({ sql: "UPDATE habits SET position = ? WHERE id = ?", args: [i, id] as SqlVal[] }))
-  );
+export async function reorderHabits(orderedIds: string[]): Promise<void> {
+  const db = await getDb();
+  const ops = orderedIds.map((id, i) => ({
+    updateOne: { filter: { _id: toOid(id) }, update: { $set: { position: i } } },
+  }));
+  if (ops.length) await db.collection("habits").bulkWrite(ops);
 }
 
-export async function deleteHabit(id: number): Promise<boolean> {
-  const { changes } = await run("DELETE FROM habits WHERE id = ?", [id]);
-  if (changes > 0) await logEvent("habit_deleted", id, null, {});
-  return changes > 0;
+export async function deleteHabit(id: string): Promise<boolean> {
+  const db = await getDb();
+  try {
+    const result = await db.collection("habits").deleteOne({ _id: toOid(id) });
+    if (result.deletedCount > 0) { await logEvent("habit_deleted", id, null, {}); return true; }
+    return false;
+  } catch { return false; }
 }
 
 // ── Entries ───────────────────────────────────────────────────────────────────
 
-const ENTRY_COLS = "habit_id, date, status, quantity, note, source, created_at";
-
 export async function entriesForRange(from: string, to: string): Promise<Entry[]> {
-  return q<Entry>(
-    `SELECT ${ENTRY_COLS} FROM entries WHERE date >= ? AND date <= ? ORDER BY date`,
-    [from, to]
-  );
+  const db = await getDb();
+  const docs = await db.collection("entries")
+    .find({ date: { $gte: from, $lte: to } })
+    .sort({ date: 1 })
+    .toArray();
+  return docs.map(docToEntry);
 }
 
-export async function entriesForHabit(habitId: number): Promise<Entry[]> {
-  return q<Entry>(`SELECT ${ENTRY_COLS} FROM entries WHERE habit_id = ? ORDER BY date`, [habitId]);
+export async function entriesForHabit(habitId: string): Promise<Entry[]> {
+  const db = await getDb();
+  const docs = await db.collection("entries")
+    .find({ habit_id: habitId })
+    .sort({ date: 1 })
+    .toArray();
+  return docs.map(docToEntry);
 }
 
-/** Bounded history — callers should pass an explicit from date. */
 export async function entriesSince(from: string): Promise<Entry[]> {
-  return q<Entry>(`SELECT ${ENTRY_COLS} FROM entries WHERE date >= ? ORDER BY date`, [from]);
+  const db = await getDb();
+  const docs = await db.collection("entries")
+    .find({ date: { $gte: from } })
+    .sort({ date: 1 })
+    .toArray();
+  return docs.map(docToEntry);
 }
 
 export interface EntryInput {
@@ -408,80 +295,89 @@ export interface EntryInput {
   quantity?: number | null;
   note?: string | null;
   source?: string;
+  duration_minutes?: number | null;
 }
 
-export async function setEntry(habitId: number, date: string, input: EntryInput): Promise<Entry | null> {
-  const existing = await q1<Entry>(
-    `SELECT ${ENTRY_COLS} FROM entries WHERE habit_id = ? AND date = ?`,
-    [habitId, date]
-  );
+export async function setEntry(habitId: string, date: string, input: EntryInput): Promise<Entry | null> {
+  const db = await getDb();
+  const col = db.collection("entries");
+  const existing = await col.findOne({ habit_id: habitId, date });
 
   const next = {
     status: input.status !== undefined ? input.status : existing?.status ?? null,
     quantity: input.quantity !== undefined ? input.quantity : existing?.quantity ?? null,
     note: input.note !== undefined ? input.note : existing?.note ?? null,
     source: input.source ?? existing?.source ?? "manual",
+    duration_minutes: input.duration_minutes !== undefined ? input.duration_minutes : existing?.duration_minutes ?? null,
   };
 
   if (next.status === null && next.quantity === null && (next.note === null || next.note === "")) {
     if (existing) {
-      await run("DELETE FROM entries WHERE habit_id = ? AND date = ?", [habitId, date]);
+      await col.deleteOne({ habit_id: habitId, date });
       await logEvent("entry_cleared", habitId, date, {});
     }
     return null;
   }
 
   const status = next.status ?? "done";
-  if (existing) {
-    await run(
-      "UPDATE entries SET status = ?, quantity = ?, note = ?, source = ? WHERE habit_id = ? AND date = ?",
-      [status, next.quantity, next.note, next.source, habitId, date]
-    );
-  } else {
-    await run(
-      "INSERT INTO entries (habit_id, date, status, quantity, note, source) VALUES (?, ?, ?, ?, ?, ?)",
-      [habitId, date, status, next.quantity, next.note, next.source]
-    );
-  }
-  await logEvent(existing ? "entry_updated" : "entry_set", habitId, date, {
-    status, quantity: next.quantity, source: next.source,
-  });
-  return q1<Entry>(`SELECT ${ENTRY_COLS} FROM entries WHERE habit_id = ? AND date = ?`, [habitId, date]);
+  await col.updateOne(
+    { habit_id: habitId, date },
+    { $set: { habit_id: habitId, date, status, quantity: next.quantity, note: next.note, source: next.source, duration_minutes: next.duration_minutes, created_at: new Date().toISOString() } },
+    { upsert: true }
+  );
+  await logEvent(existing ? "entry_updated" : "entry_set", habitId, date, { status, quantity: next.quantity, source: next.source });
+  const doc = await col.findOne({ habit_id: habitId, date });
+  return doc ? docToEntry(doc) : null;
 }
 
 // ── Context ───────────────────────────────────────────────────────────────────
 
 export async function listContext(from: string, to: string): Promise<ContextDay[]> {
-  return q<ContextDay>(
-    "SELECT date, mood, energy, sleep_hours FROM daily_context WHERE date >= ? AND date <= ? ORDER BY date",
-    [from, to]
-  );
+  const db = await getDb();
+  const docs = await db.collection("daily_context")
+    .find({ date: { $gte: from, $lte: to } })
+    .sort({ date: 1 })
+    .toArray();
+  return docs.map(docToContext);
 }
 
 export async function allContext(): Promise<ContextDay[]> {
-  return q<ContextDay>("SELECT date, mood, energy, sleep_hours FROM daily_context ORDER BY date");
+  const db = await getDb();
+  const docs = await db.collection("daily_context").find({}).sort({ date: 1 }).toArray();
+  return docs.map(docToContext);
+}
+
+export async function getContext(date: string): Promise<ContextDay | null> {
+  const db = await getDb();
+  const doc = await db.collection("daily_context").findOne({ date });
+  return doc ? docToContext(doc) : null;
 }
 
 export async function setContext(
-  date: string, mood: number | null, energy: number | null, sleep: number | null
+  date: string, mood: number | null, energy: number | null, sleep: number | null, notes?: string | null
 ): Promise<void> {
-  await run(
-    `INSERT INTO daily_context (date, mood, energy, sleep_hours) VALUES (?, ?, ?, ?)
-     ON CONFLICT(date) DO UPDATE SET mood = excluded.mood, energy = excluded.energy, sleep_hours = excluded.sleep_hours`,
-    [date, mood, energy, sleep]
+  const db = await getDb();
+  await db.collection("daily_context").updateOne(
+    { date },
+    { $set: { date, mood, energy, sleep_hours: sleep, notes: notes ?? null } },
+    { upsert: true }
   );
 }
 
 // ── Goals ─────────────────────────────────────────────────────────────────────
 
-const GOAL_COLS = "id, name, description, target_date, parent_id, created_at, category, priority, timeframe, start_date, status, ai_context, eisenhower";
-
 export async function listGoals(): Promise<Goal[]> {
-  return q<Goal>(`SELECT ${GOAL_COLS} FROM goals WHERE parent_id IS NULL ORDER BY id`);
+  const db = await getDb();
+  const docs = await db.collection("goals").find({}).sort({ _id: 1 }).toArray();
+  return docs.map(docToGoal);
 }
 
-export async function getGoal(id: number): Promise<Goal | null> {
-  return q1<Goal>(`SELECT ${GOAL_COLS} FROM goals WHERE id = ?`, [id]);
+export async function getGoal(id: string): Promise<Goal | null> {
+  const db = await getDb();
+  try {
+    const doc = await db.collection("goals").findOne({ _id: toOid(id) });
+    return doc ? docToGoal(doc) : null;
+  } catch { return null; }
 }
 
 interface GoalCreateFields {
@@ -497,26 +393,27 @@ interface GoalCreateFields {
 }
 
 export async function createGoal(fields: GoalCreateFields): Promise<Goal> {
-  const { lastId } = await run(
-    `INSERT INTO goals (name, description, target_date, category, priority, timeframe, start_date, ai_context, eisenhower, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'))`,
-    [
-      fields.name,
-      fields.description ?? "",
-      fields.target_date ?? null,
-      fields.category ?? "General",
-      fields.priority ?? "medium",
-      fields.timeframe ?? "custom",
-      fields.start_date ?? null,
-      fields.ai_context ?? "",
-      fields.eisenhower ?? null,
-    ]
-  );
-  return (await getGoal(lastId))!;
+  const db = await getDb();
+  const doc = {
+    name: fields.name,
+    description: fields.description ?? "",
+    target_date: fields.target_date ?? null,
+    category: fields.category ?? "General",
+    priority: fields.priority ?? "medium",
+    timeframe: fields.timeframe ?? "custom",
+    start_date: fields.start_date ?? null,
+    status: "active",
+    ai_context: fields.ai_context ?? "",
+    eisenhower: fields.eisenhower ?? null,
+    parent_id: null,
+    created_at: new Date().toISOString(),
+  };
+  const result = await db.collection("goals").insertOne(doc);
+  return (await getGoal(result.insertedId.toString()))!;
 }
 
 export async function updateGoal(
-  id: number,
+  id: string,
   fields: {
     name?: string; description?: string; target_date?: string | null;
     category?: string; priority?: string; timeframe?: string;
@@ -524,67 +421,61 @@ export async function updateGoal(
     eisenhower?: string | null;
   }
 ): Promise<Goal | null> {
-  const sets: string[] = [];
-  const args: SqlVal[] = [];
-  const add = (col: string, val: SqlVal) => { sets.push(`${col} = ?`); args.push(val); };
-  if (fields.name        !== undefined) add("name",        fields.name);
-  if (fields.description !== undefined) add("description", fields.description);
-  if (fields.target_date !== undefined) add("target_date", fields.target_date);
-  if (fields.category    !== undefined) add("category",    fields.category);
-  if (fields.priority    !== undefined) add("priority",    fields.priority);
-  if (fields.timeframe   !== undefined) add("timeframe",   fields.timeframe);
-  if (fields.start_date  !== undefined) add("start_date",  fields.start_date);
-  if (fields.status      !== undefined) add("status",      fields.status);
-  if (fields.ai_context  !== undefined) add("ai_context",  fields.ai_context);
-  if (fields.eisenhower  !== undefined) add("eisenhower",  fields.eisenhower);
-  if (sets.length) await run(`UPDATE goals SET ${sets.join(", ")} WHERE id = ?`, [...args, id]);
+  const db = await getDb();
+  const update: Record<string, unknown> = {};
+  if (fields.name        !== undefined) update.name        = fields.name;
+  if (fields.description !== undefined) update.description = fields.description;
+  if (fields.target_date !== undefined) update.target_date = fields.target_date;
+  if (fields.category    !== undefined) update.category    = fields.category;
+  if (fields.priority    !== undefined) update.priority    = fields.priority;
+  if (fields.timeframe   !== undefined) update.timeframe   = fields.timeframe;
+  if (fields.start_date  !== undefined) update.start_date  = fields.start_date;
+  if (fields.status      !== undefined) update.status      = fields.status;
+  if (fields.ai_context  !== undefined) update.ai_context  = fields.ai_context;
+  if (fields.eisenhower  !== undefined) update.eisenhower  = fields.eisenhower;
+  if (Object.keys(update).length > 0) {
+    try { await db.collection("goals").updateOne({ _id: toOid(id) }, { $set: update }); }
+    catch { return null; }
+  }
   return getGoal(id);
 }
 
-export async function deleteGoal(id: number): Promise<boolean> {
-  // Gather milestones from both old (goals.parent_id) and new (milestones table)
-  const newMs = await q<{ id: number }>("SELECT id FROM milestones WHERE goal_id = ?", [id]);
-  const oldMs = await q<{ id: number }>("SELECT id FROM goals WHERE parent_id = ?", [id]);
-
-  const stmts: Array<{ sql: string; args: SqlVal[] }> = [];
-  // Unlink habits from new milestones
-  for (const { id: msId } of newMs) {
-    stmts.push({ sql: "UPDATE habits SET milestone_id = NULL WHERE milestone_id = ?", args: [msId] });
-    stmts.push({ sql: "UPDATE habits SET goal_id = NULL WHERE goal_id = ?", args: [msId] });
+export async function deleteGoal(id: string): Promise<boolean> {
+  const db = await getDb();
+  const milestones = await db.collection("milestones").find({ goal_id: id }).toArray();
+  const msIds = milestones.map((m) => (m._id as ObjectId).toString());
+  if (msIds.length > 0) {
+    await db.collection("habits").updateMany({ milestone_id: { $in: msIds } }, { $set: { milestone_id: null } });
   }
-  // Unlink habits from old milestone-as-goals
-  for (const { id: msId } of oldMs) {
-    stmts.push({ sql: "UPDATE habits SET goal_id = NULL WHERE goal_id = ?", args: [msId] });
-  }
-  stmts.push({ sql: "UPDATE habits SET goal_id = NULL WHERE goal_id = ?", args: [id] });
-  stmts.push({ sql: "DELETE FROM milestones WHERE goal_id = ?", args: [id] });
-  if (oldMs.length > 0) {
-    stmts.push({ sql: "DELETE FROM goals WHERE parent_id = ?", args: [id] });
-  }
-  stmts.push({ sql: "DELETE FROM goals WHERE id = ?", args: [id] });
-
-  const c = await db();
-  const results = await c.batch(stmts as never, "write");
-  return results[results.length - 1].rowsAffected > 0;
+  await db.collection("milestones").deleteMany({ goal_id: id });
+  try {
+    const result = await db.collection("goals").deleteOne({ _id: toOid(id) });
+    return result.deletedCount > 0;
+  } catch { return false; }
 }
 
 // ── Milestones ────────────────────────────────────────────────────────────────
 
-const MS_COLS = "id, goal_id, title, explanation, estimated_duration, order_index, dependencies, success_criteria, status, target_date, created_at";
-
-export async function listMilestones(goalId?: number): Promise<Milestone[]> {
-  if (goalId !== undefined) {
-    return q<Milestone>(`SELECT ${MS_COLS} FROM milestones WHERE goal_id = ? ORDER BY order_index, id`, [goalId]);
-  }
-  return q<Milestone>(`SELECT ${MS_COLS} FROM milestones ORDER BY goal_id, order_index, id`);
+export async function listMilestones(goalId?: string): Promise<Milestone[]> {
+  const db = await getDb();
+  const filter = goalId ? { goal_id: goalId } : {};
+  const docs = await db.collection("milestones")
+    .find(filter)
+    .sort({ goal_id: 1, order_index: 1, _id: 1 })
+    .toArray();
+  return docs.map(docToMilestone);
 }
 
-export async function getMilestone(id: number): Promise<Milestone | null> {
-  return q1<Milestone>(`SELECT ${MS_COLS} FROM milestones WHERE id = ?`, [id]);
+export async function getMilestone(id: string): Promise<Milestone | null> {
+  const db = await getDb();
+  try {
+    const doc = await db.collection("milestones").findOne({ _id: toOid(id) });
+    return doc ? docToMilestone(doc) : null;
+  } catch { return null; }
 }
 
 interface MilestoneCreateFields {
-  goal_id: number;
+  goal_id: string;
   title: string;
   explanation?: string;
   estimated_duration?: string;
@@ -595,91 +486,95 @@ interface MilestoneCreateFields {
 }
 
 export async function createMilestone(fields: MilestoneCreateFields): Promise<Milestone> {
-  const { lastId } = await run(
-    `INSERT INTO milestones (goal_id, title, explanation, estimated_duration, order_index, dependencies, success_criteria, status, target_date, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, datetime('now'))`,
-    [
-      fields.goal_id,
-      fields.title,
-      fields.explanation ?? "",
-      fields.estimated_duration ?? "",
-      fields.order_index ?? 0,
-      fields.dependencies ?? "[]",
-      fields.success_criteria ?? "",
-      fields.target_date ?? null,
-    ]
-  );
-  return (await getMilestone(lastId))!;
+  const db = await getDb();
+  const doc = {
+    goal_id: fields.goal_id,
+    title: fields.title,
+    explanation: fields.explanation ?? "",
+    estimated_duration: fields.estimated_duration ?? "",
+    order_index: fields.order_index ?? 0,
+    dependencies: fields.dependencies ?? "[]",
+    success_criteria: fields.success_criteria ?? "",
+    status: "pending",
+    target_date: fields.target_date ?? null,
+    created_at: new Date().toISOString(),
+  };
+  const result = await db.collection("milestones").insertOne(doc);
+  return (await getMilestone(result.insertedId.toString()))!;
 }
 
 export async function updateMilestone(
-  id: number,
+  id: string,
   fields: {
     title?: string; explanation?: string; estimated_duration?: string;
     order_index?: number; dependencies?: string; success_criteria?: string;
     status?: string; target_date?: string | null;
   }
 ): Promise<Milestone | null> {
-  const sets: string[] = [];
-  const args: SqlVal[] = [];
-  const add = (col: string, val: SqlVal) => { sets.push(`${col} = ?`); args.push(val); };
-  if (fields.title              !== undefined) add("title",              fields.title);
-  if (fields.explanation        !== undefined) add("explanation",        fields.explanation);
-  if (fields.estimated_duration !== undefined) add("estimated_duration", fields.estimated_duration);
-  if (fields.order_index        !== undefined) add("order_index",        fields.order_index);
-  if (fields.dependencies       !== undefined) add("dependencies",       fields.dependencies);
-  if (fields.success_criteria   !== undefined) add("success_criteria",   fields.success_criteria);
-  if (fields.status             !== undefined) add("status",             fields.status);
-  if (fields.target_date        !== undefined) add("target_date",        fields.target_date);
-  if (sets.length) await run(`UPDATE milestones SET ${sets.join(", ")} WHERE id = ?`, [...args, id]);
+  const db = await getDb();
+  const update: Record<string, unknown> = {};
+  if (fields.title              !== undefined) update.title              = fields.title;
+  if (fields.explanation        !== undefined) update.explanation        = fields.explanation;
+  if (fields.estimated_duration !== undefined) update.estimated_duration = fields.estimated_duration;
+  if (fields.order_index        !== undefined) update.order_index        = fields.order_index;
+  if (fields.dependencies       !== undefined) update.dependencies       = fields.dependencies;
+  if (fields.success_criteria   !== undefined) update.success_criteria   = fields.success_criteria;
+  if (fields.status             !== undefined) update.status             = fields.status;
+  if (fields.target_date        !== undefined) update.target_date        = fields.target_date;
+  if (Object.keys(update).length > 0) {
+    try { await db.collection("milestones").updateOne({ _id: toOid(id) }, { $set: update }); }
+    catch { return null; }
+  }
   return getMilestone(id);
 }
 
-export async function deleteMilestone(id: number): Promise<boolean> {
-  await run("UPDATE habits SET milestone_id = NULL WHERE milestone_id = ?", [id]);
-  const { changes } = await run("DELETE FROM milestones WHERE id = ?", [id]);
-  return changes > 0;
+export async function deleteMilestone(id: string): Promise<boolean> {
+  const db = await getDb();
+  await db.collection("habits").updateMany({ milestone_id: id }, { $set: { milestone_id: null } });
+  try {
+    const result = await db.collection("milestones").deleteOne({ _id: toOid(id) });
+    return result.deletedCount > 0;
+  } catch { return false; }
 }
 
 // ── Experiments ───────────────────────────────────────────────────────────────
 
 export async function listExperiments(): Promise<Experiment[]> {
-  return q<Experiment>(
-    "SELECT id, name, habit_id, a_label, a_from, a_to, b_label, b_from, b_to FROM experiments ORDER BY id DESC"
-  );
+  const db = await getDb();
+  const docs = await db.collection("experiments").find({}).sort({ _id: -1 }).toArray();
+  return docs.map(docToExperiment);
 }
 
 export async function createExperiment(x: Omit<Experiment, "id">): Promise<Experiment> {
-  const { lastId } = await run(
-    "INSERT INTO experiments (name, habit_id, a_label, a_from, a_to, b_label, b_from, b_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    [x.name, x.habit_id, x.a_label, x.a_from, x.a_to, x.b_label, x.b_from, x.b_to]
-  );
-  return (await q1<Experiment>(
-    "SELECT id, name, habit_id, a_label, a_from, a_to, b_label, b_from, b_to FROM experiments WHERE id = ?",
-    [lastId]
-  ))!;
+  const db = await getDb();
+  const result = await db.collection("experiments").insertOne({ ...x });
+  const doc = await db.collection("experiments").findOne({ _id: result.insertedId });
+  return docToExperiment(doc!);
 }
 
-export async function deleteExperiment(id: number): Promise<boolean> {
-  const { changes } = await run("DELETE FROM experiments WHERE id = ?", [id]);
-  return changes > 0;
+export async function deleteExperiment(id: string): Promise<boolean> {
+  const db = await getDb();
+  try {
+    const result = await db.collection("experiments").deleteOne({ _id: toOid(id) });
+    return result.deletedCount > 0;
+  } catch { return false; }
 }
 
 // ── Settings / Tokens ─────────────────────────────────────────────────────────
 
 export async function getSetting(key: string): Promise<string | null> {
-  const r = await q1<{ value: string }>("SELECT value FROM settings WHERE key = ?", [key]);
-  return r?.value ?? null;
+  const db = await getDb();
+  const doc = await db.collection("settings").findOne({ key });
+  return doc ? (doc.value as string) : null;
 }
 
 export async function setSetting(key: string, value: string | null): Promise<void> {
-  if (value === null) {
-    await run("DELETE FROM settings WHERE key = ?", [key]);
-    return;
-  }
-  await run(
-    "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    [key, value]
+  const db = await getDb();
+  if (value === null) { await db.collection("settings").deleteOne({ key }); return; }
+  await db.collection("settings").updateOne(
+    { key },
+    { $set: { key, value } },
+    { upsert: true }
   );
 }
 
@@ -703,37 +598,97 @@ export async function checkApiKey(authHeader: string | null): Promise<boolean> {
 export interface PushSub { endpoint: string; p256dh: string; auth: string; }
 
 export async function savePushSub(sub: PushSub): Promise<void> {
-  const c = await db();
-  await c.execute({
-    sql: "INSERT OR REPLACE INTO push_subscriptions (endpoint, p256dh, auth) VALUES (?, ?, ?)",
-    args: [sub.endpoint, sub.p256dh, sub.auth],
-  });
+  const db = await getDb();
+  await db.collection("push_subscriptions").updateOne(
+    { endpoint: sub.endpoint },
+    { $set: { ...sub, created_at: new Date().toISOString() } },
+    { upsert: true }
+  );
 }
 
 export async function deletePushSub(endpoint: string): Promise<void> {
-  const c = await db();
-  await c.execute({ sql: "DELETE FROM push_subscriptions WHERE endpoint = ?", args: [endpoint] });
+  const db = await getDb();
+  await db.collection("push_subscriptions").deleteOne({ endpoint });
 }
 
 export async function listPushSubs(): Promise<PushSub[]> {
-  const c = await db();
-  const rows = (await c.execute("SELECT endpoint, p256dh, auth FROM push_subscriptions")).rows;
-  return rows.map((r) => ({ endpoint: String(r.endpoint), p256dh: String(r.p256dh), auth: String(r.auth) }));
+  const db = await getDb();
+  const docs = await db.collection("push_subscriptions").find({}).toArray();
+  return docs.map((d) => ({ endpoint: d.endpoint as string, p256dh: d.p256dh as string, auth: d.auth as string }));
+}
+
+// ── Reminders ──────────────────────────────────────────────────────────────────
+
+export interface Reminder {
+  id: string;
+  message: string;
+  time: string;      // "HH:MM" in IST
+  days: string;      // "daily" | CSV of weekday numbers 0-6 (0=Sun)
+  enabled: boolean;
+  created_at: string;
+}
+
+function docToReminder(d: Document): Reminder {
+  return {
+    id: String(d._id),
+    message: d.message as string,
+    time: d.time as string,
+    days: d.days as string,
+    enabled: d.enabled as boolean,
+    created_at: d.created_at as string,
+  };
+}
+
+export async function listReminders(): Promise<Reminder[]> {
+  const db = await getDb();
+  const docs = await db.collection("reminders").find({}).sort({ time: 1 }).toArray();
+  return docs.map(docToReminder);
+}
+
+export async function createReminder(input: Omit<Reminder, "id" | "created_at">): Promise<Reminder> {
+  const db = await getDb();
+  const doc = { ...input, enabled: true, created_at: new Date().toISOString() };
+  const r = await db.collection("reminders").insertOne(doc);
+  return docToReminder({ _id: r.insertedId, ...doc });
+}
+
+export async function updateReminder(id: string, patch: Partial<Pick<Reminder, "message" | "time" | "days" | "enabled">>): Promise<void> {
+  const db = await getDb();
+  await db.collection("reminders").updateOne({ _id: new ObjectId(id) }, { $set: patch });
+}
+
+export async function deleteReminder(id: string): Promise<void> {
+  const db = await getDb();
+  await db.collection("reminders").deleteOne({ _id: new ObjectId(id) });
+}
+
+export async function listEnabledRemindersForTime(time: string): Promise<Reminder[]> {
+  const db = await getDb();
+  const docs = await db.collection("reminders").find({ enabled: true, time }).toArray();
+  return docs.map(docToReminder);
 }
 
 // ── Backup / Import ───────────────────────────────────────────────────────────
 
 export async function exportAll() {
-  const c = await db();
+  const db = await getDb();
+  const [habits, goals, milestones, entries, daily_context, experiments] = await Promise.all([
+    db.collection("habits").find({}).toArray(),
+    db.collection("goals").find({}).toArray(),
+    db.collection("milestones").find({}).toArray(),
+    db.collection("entries").find({}).toArray(),
+    db.collection("daily_context").find({}).toArray(),
+    db.collection("experiments").find({}).toArray(),
+  ]);
   return {
-    version: 3,
+    version: 4,
     exported_at: new Date().toISOString(),
-    habits: (await c.execute(`SELECT ${HABIT_COLS}, created_at FROM habits`)).rows,
-    goals: (await c.execute(`SELECT ${GOAL_COLS} FROM goals`)).rows,
-    milestones: (await c.execute(`SELECT ${MS_COLS} FROM milestones`)).rows,
-    entries: (await c.execute("SELECT habit_id, date, status, quantity, note, source, created_at FROM entries")).rows,
-    daily_context: (await c.execute("SELECT date, mood, energy, sleep_hours FROM daily_context")).rows,
-    experiments: (await c.execute("SELECT id, name, habit_id, a_label, a_from, a_to, b_label, b_from, b_to FROM experiments")).rows,
+    habits: habits.map(docToHabit),
+    goals: goals.map(docToGoal),
+    milestones: milestones.map(docToMilestone),
+    entries: entries.map(docToEntry),
+    daily_context: daily_context.map(docToContext),
+    experiments: experiments.map(docToExperiment),
   };
 }
 
@@ -741,179 +696,228 @@ export async function importAll(data: {
   habits?: unknown[]; goals?: unknown[]; milestones?: unknown[]; entries?: unknown[];
   daily_context?: unknown[]; experiments?: unknown[];
 }): Promise<void> {
-  const goals = (data.goals ?? []) as Goal[];
-  const milestones = (data.milestones ?? []) as Milestone[];
-  const habits = (data.habits ?? []) as (Habit & { created_at?: string })[];
-  const entries = (data.entries ?? []) as Entry[];
-  const ctx = (data.daily_context ?? []) as ContextDay[];
-  const exps = (data.experiments ?? []) as Experiment[];
+  const db = await getDb();
+  await Promise.all([
+    db.collection("entries").deleteMany({}),
+    db.collection("experiments").deleteMany({}),
+    db.collection("habits").deleteMany({}),
+    db.collection("milestones").deleteMany({}),
+    db.collection("goals").deleteMany({}),
+    db.collection("daily_context").deleteMany({}),
+  ]);
 
-  const stmts: Array<{ sql: string; args: SqlVal[] }> = [
-    { sql: "DELETE FROM entries", args: [] },
-    { sql: "DELETE FROM experiments", args: [] },
-    { sql: "DELETE FROM habits", args: [] },
-    { sql: "DELETE FROM milestones", args: [] },
-    { sql: "DELETE FROM goals", args: [] },
-    { sql: "DELETE FROM daily_context", args: [] },
-  ];
+  const goals       = (data.goals       ?? []) as Goal[];
+  const milestones  = (data.milestones  ?? []) as Milestone[];
+  const habits      = (data.habits      ?? []) as Habit[];
+  const entries     = (data.entries     ?? []) as Entry[];
+  const ctx         = (data.daily_context ?? []) as ContextDay[];
+  const exps        = (data.experiments ?? []) as Experiment[];
 
-  for (const g of goals)
-    stmts.push({
-      sql: `INSERT INTO goals (id, name, description, target_date, category, priority, timeframe, start_date, status, ai_context, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [g.id, g.name, g.description ?? "", g.target_date ?? null,
-        g.category ?? "General", g.priority ?? "medium", g.timeframe ?? "custom",
-        g.start_date ?? null, g.status ?? "active", g.ai_context ?? "", g.created_at ?? null],
-    });
+  // Strip the id field so MongoDB generates new _id values
+  if (goals.length)      await db.collection("goals").insertMany(goals.map(({ id: _id2, ...r }) => r));
+  if (milestones.length) await db.collection("milestones").insertMany(milestones.map(({ id: _id2, ...r }) => r));
+  if (habits.length)     await db.collection("habits").insertMany(habits.map(({ id: _id2, ...r }) => r));
+  if (entries.length)    await db.collection("entries").insertMany(entries);
+  if (ctx.length)        await db.collection("daily_context").insertMany(ctx);
+  if (exps.length)       await db.collection("experiments").insertMany(exps.map(({ id: _id2, ...r }) => r));
 
-  for (const m of milestones)
-    stmts.push({
-      sql: `INSERT INTO milestones (id, goal_id, title, explanation, estimated_duration, order_index, dependencies, success_criteria, status, target_date, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [m.id, m.goal_id, m.title, m.explanation ?? "", m.estimated_duration ?? "",
-        m.order_index ?? 0, m.dependencies ?? "[]", m.success_criteria ?? "",
-        m.status ?? "pending", m.target_date ?? null, m.created_at],
-    });
-
-  for (const h of habits)
-    stmts.push({
-      sql: `INSERT INTO habits (id, name, category, goal, frequency_type, weekdays, times_per_week,
-              quantity_target, quantity_unit, verify_type, verify_config, goal_id, milestone_id, position, archived, why)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [
-        h.id, h.name, h.category ?? "General", h.goal ?? 30, h.frequency_type ?? "daily",
-        h.weekdays ?? "", h.times_per_week ?? 3, h.quantity_target ?? 0, h.quantity_unit ?? "",
-        h.verify_type ?? "manual", h.verify_config ?? "{}", h.goal_id ?? null,
-        h.milestone_id ?? null, h.position ?? 0, h.archived ?? 0, h.why ?? "",
-      ],
-    });
-
-  for (const e of entries)
-    stmts.push({
-      sql: "INSERT INTO entries (habit_id, date, status, quantity, note, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      args: [
-        e.habit_id, e.date, e.status ?? "done", e.quantity ?? null, e.note ?? null,
-        e.source ?? "manual",
-        e.created_at ?? new Date().toISOString().slice(0, 19).replace("T", " "),
-      ],
-    });
-
-  for (const c of ctx)
-    stmts.push({
-      sql: "INSERT INTO daily_context (date, mood, energy, sleep_hours) VALUES (?, ?, ?, ?)",
-      args: [c.date, c.mood ?? null, c.energy ?? null, c.sleep_hours ?? null],
-    });
-
-  for (const x of exps)
-    stmts.push({
-      sql: "INSERT INTO experiments (id, name, habit_id, a_label, a_from, a_to, b_label, b_from, b_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      args: [x.id, x.name, x.habit_id, x.a_label, x.a_from, x.a_to, x.b_label, x.b_from, x.b_to],
-    });
-
-  await batchRun(stmts);
   await logEvent("import", null, null, { habits: habits.length, entries: entries.length });
 }
 
 // ── Expenses ──────────────────────────────────────────────────────────────────
 
 export interface Expense {
-  id: number; date: string; name: string; amount: number;
+  id: string; date: string; name: string; amount: number;
   type: "expense" | "credit"; category: string; note: string | null; created_at: string;
 }
 export interface ExpenseBudget {
-  id: number; month: string; category: string; amount: number;
+  id: string; month: string; category: string; amount: number;
 }
 
-const EXP_COLS = "id, date, name, amount, type, category, note, created_at";
+function docToExpense(doc: Document): Expense {
+  const { _id, ...rest } = doc;
+  return { id: (_id as ObjectId).toString(), ...rest } as Expense;
+}
+
+function docToBudget(doc: Document): ExpenseBudget {
+  const { _id, ...rest } = doc;
+  return { id: (_id as ObjectId).toString(), ...rest } as ExpenseBudget;
+}
 
 export async function listExpenses(from: string, to: string): Promise<Expense[]> {
-  return q<Expense>(
-    `SELECT ${EXP_COLS} FROM expenses WHERE date >= ? AND date <= ? ORDER BY date DESC, id DESC`,
-    [from, to]
-  );
+  const db = await getDb();
+  const docs = await db.collection("expenses")
+    .find({ date: { $gte: from, $lte: to } })
+    .sort({ date: -1, _id: -1 })
+    .toArray();
+  return docs.map(docToExpense);
 }
 
 export async function createExpense(input: {
   date: string; name: string; amount: number;
   type?: "expense" | "credit"; category?: string; note?: string | null;
 }): Promise<Expense> {
-  const { lastId } = await run(
-    "INSERT INTO expenses (date, name, amount, type, category, note) VALUES (?, ?, ?, ?, ?, ?)",
-    [
-      input.date, input.name.trim().slice(0, 120), Math.abs(input.amount),
-      input.type ?? "expense", input.category ?? "Other", input.note ?? null,
-    ]
-  );
-  return (await q1<Expense>(`SELECT ${EXP_COLS} FROM expenses WHERE id = ?`, [lastId]))!;
+  const db = await getDb();
+  const doc = {
+    date: input.date,
+    name: input.name.trim().slice(0, 120),
+    amount: Math.abs(input.amount),
+    type: input.type ?? "expense",
+    category: input.category ?? "Other",
+    note: input.note ?? null,
+    created_at: new Date().toISOString(),
+  };
+  const result = await db.collection("expenses").insertOne(doc);
+  const newDoc = await db.collection("expenses").findOne({ _id: result.insertedId });
+  return docToExpense(newDoc!);
 }
 
-export async function updateExpense(id: number, input: Partial<{
+export async function updateExpense(id: string, input: Partial<{
   date: string; name: string; amount: number; type: string; category: string; note: string | null;
 }>): Promise<Expense | null> {
-  const allowed: Record<string, string> = {
-    date: "date", name: "name", amount: "amount", type: "type", category: "category", note: "note",
-  };
-  const stmts: Array<{ sql: string; args: SqlVal[] }> = [];
-  for (const [k, col] of Object.entries(allowed)) {
-    const v = (input as Record<string, unknown>)[k];
-    if (v !== undefined) stmts.push({ sql: `UPDATE expenses SET ${col} = ? WHERE id = ?`, args: [v as SqlVal, id] });
-  }
-  if (stmts.length) await batchRun(stmts);
-  return q1<Expense>(`SELECT ${EXP_COLS} FROM expenses WHERE id = ?`, [id]);
+  const db = await getDb();
+  const update: Record<string, unknown> = {};
+  if (input.name     !== undefined) update.name     = input.name;
+  if (input.amount   !== undefined) update.amount   = input.amount;
+  if (input.date     !== undefined) update.date     = input.date;
+  if (input.type     !== undefined) update.type     = input.type;
+  if (input.category !== undefined) update.category = input.category;
+  if (input.note     !== undefined) update.note     = input.note;
+  try {
+    await db.collection("expenses").updateOne({ _id: toOid(id) }, { $set: update });
+    const doc = await db.collection("expenses").findOne({ _id: toOid(id) });
+    return doc ? docToExpense(doc) : null;
+  } catch { return null; }
 }
 
-export async function deleteExpense(id: number): Promise<boolean> {
-  const { changes } = await run("DELETE FROM expenses WHERE id = ?", [id]);
-  return changes > 0;
+export async function deleteExpense(id: string): Promise<boolean> {
+  const db = await getDb();
+  try {
+    const result = await db.collection("expenses").deleteOne({ _id: toOid(id) });
+    return result.deletedCount > 0;
+  } catch { return false; }
 }
 
 export async function listBudgets(month: string): Promise<ExpenseBudget[]> {
-  return q<ExpenseBudget>(
-    "SELECT id, month, category, amount FROM expense_budgets WHERE month = ? ORDER BY category",
-    [month]
-  );
+  const db = await getDb();
+  const docs = await db.collection("expense_budgets")
+    .find({ month })
+    .sort({ category: 1 })
+    .toArray();
+  return docs.map(docToBudget);
 }
 
 export async function setBudget(month: string, category: string, amount: number): Promise<void> {
-  await run(
-    `INSERT INTO expense_budgets (month, category, amount) VALUES (?, ?, ?)
-     ON CONFLICT(month, category) DO UPDATE SET amount = excluded.amount`,
-    [month, category, amount]
+  const db = await getDb();
+  await db.collection("expense_budgets").updateOne(
+    { month, category },
+    { $set: { month, category, amount } },
+    { upsert: true }
   );
 }
 
-export async function deleteBudget(id: number): Promise<boolean> {
-  const { changes } = await run("DELETE FROM expense_budgets WHERE id = ?", [id]);
-  return changes > 0;
+export async function deleteBudget(id: string): Promise<boolean> {
+  const db = await getDb();
+  try {
+    const result = await db.collection("expense_budgets").deleteOne({ _id: toOid(id) });
+    return result.deletedCount > 0;
+  } catch { return false; }
 }
 
 // ── Weekly Reviews ────────────────────────────────────────────────────────────
 
 export async function listReviews(limit = 8): Promise<WeeklyReview[]> {
-  return q<WeeklyReview>(
-    "SELECT id, week_start, went_well, got_in_way, protect_time, created_at FROM weekly_reviews ORDER BY week_start DESC LIMIT ?",
-    [Math.min(20, limit)]
-  );
+  const db = await getDb();
+  const docs = await db.collection("weekly_reviews")
+    .find({})
+    .sort({ week_start: -1 })
+    .limit(Math.min(20, limit))
+    .toArray();
+  return docs.map(docToReview);
 }
 
 export async function getReview(weekStart: string): Promise<WeeklyReview | null> {
-  return q1<WeeklyReview>(
-    "SELECT id, week_start, went_well, got_in_way, protect_time, created_at FROM weekly_reviews WHERE week_start = ?",
-    [weekStart]
-  );
+  const db = await getDb();
+  const doc = await db.collection("weekly_reviews").findOne({ week_start: weekStart });
+  return doc ? docToReview(doc) : null;
 }
 
 export async function upsertReview(
   weekStart: string, wentWell: string, gotInWay: string, protectTime: string
 ): Promise<WeeklyReview> {
-  await run(
-    `INSERT INTO weekly_reviews (week_start, went_well, got_in_way, protect_time)
-     VALUES (?, ?, ?, ?)
-     ON CONFLICT(week_start) DO UPDATE SET
-       went_well = excluded.went_well,
-       got_in_way = excluded.got_in_way,
-       protect_time = excluded.protect_time`,
-    [weekStart, wentWell, gotInWay, protectTime]
+  const db = await getDb();
+  await db.collection("weekly_reviews").updateOne(
+    { week_start: weekStart },
+    { $set: { week_start: weekStart, went_well: wentWell, got_in_way: gotInWay, protect_time: protectTime, created_at: new Date().toISOString() } },
+    { upsert: true }
   );
   return (await getReview(weekStart))!;
+}
+
+// ── Jobs ──────────────────────────────────────────────────────────────────────
+
+export interface Job {
+  id: string;
+  company: string;
+  role: string;
+  status: string;
+  date_applied: string | null;
+  referral: boolean;
+  referral_contact: string;
+  salary: string;
+  job_link: string;
+  notes: string;
+  created_at: string;
+}
+
+function docToJob(doc: Document): Job {
+  const { _id, ...rest } = doc;
+  return { id: (_id as ObjectId).toString(), ...rest } as Job;
+}
+
+export async function listJobs(): Promise<Job[]> {
+  const db = await getDb();
+  const docs = await db.collection("jobs").find({}).sort({ created_at: -1 }).toArray();
+  return docs.map(docToJob);
+}
+
+export async function createJob(input: Omit<Job, "id" | "created_at">): Promise<Job> {
+  const db = await getDb();
+  const doc = { ...input, created_at: new Date().toISOString() };
+  const result = await db.collection("jobs").insertOne(doc);
+  return docToJob((await db.collection("jobs").findOne({ _id: result.insertedId }))!);
+}
+
+export async function updateJob(id: string, input: Partial<Omit<Job, "id" | "created_at">>): Promise<Job | null> {
+  const db = await getDb();
+  try {
+    await db.collection("jobs").updateOne({ _id: toOid(id) }, { $set: input });
+    const doc = await db.collection("jobs").findOne({ _id: toOid(id) });
+    return doc ? docToJob(doc) : null;
+  } catch { return null; }
+}
+
+export async function deleteJob(id: string): Promise<boolean> {
+  const db = await getDb();
+  try {
+    const result = await db.collection("jobs").deleteOne({ _id: toOid(id) });
+    return result.deletedCount > 0;
+  } catch { return false; }
+}
+
+// ── Daily MITs ────────────────────────────────────────────────────────────────
+
+export async function getMits(date: string): Promise<string[]> {
+  const db = await getDb();
+  const doc = await db.collection("daily_mits").findOne({ date });
+  return doc ? (doc.mit_ids as string[]) : [];
+}
+
+export async function setMits(date: string, mitIds: string[]): Promise<void> {
+  const db = await getDb();
+  await db.collection("daily_mits").updateOne(
+    { date },
+    { $set: { date, mit_ids: mitIds.slice(0, 3) } },
+    { upsert: true }
+  );
 }

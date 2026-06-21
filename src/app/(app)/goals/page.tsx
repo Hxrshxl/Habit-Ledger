@@ -75,8 +75,8 @@ function MilestoneRow({
   habits: Habit[];
   emap: Map<string, Entry>;
   today: string;
-  onStatusChange: (id: number, status: string) => void;
-  onDelete: (id: number) => void;
+  onStatusChange: (id: string, status: string) => void;
+  onDelete: (id: string) => void;
   onEdit: (ms: Milestone) => void;
 }) {
   const pct = milestoneProgress(ms, habits, emap, today);
@@ -142,10 +142,10 @@ function GoalCard({
   today: string;
   onDelete: (g: Goal) => void;
   onEdit: (g: Goal) => void;
-  onMilestoneStatusChange: (id: number, status: string) => void;
-  onMilestoneDelete: (id: number) => void;
+  onMilestoneStatusChange: (id: string, status: string) => void;
+  onMilestoneDelete: (id: string) => void;
   onMilestoneEdit: (ms: Milestone) => void;
-  onAddMilestone: (goalId: number) => void;
+  onAddMilestone: (goalId: string) => void;
 }) {
   const [expanded, setExpanded] = useState(true);
   const gMs = milestones.filter((m) => m.goal_id === goal.id);
@@ -222,7 +222,7 @@ function GoalCard({
 // ── Edit forms ────────────────────────────────────────────────────────────────
 
 interface GoalFormState {
-  id?: number;
+  id?: string;
   name: string;
   description: string;
   category: string;
@@ -235,8 +235,8 @@ interface GoalFormState {
 }
 
 interface MsFormState {
-  id?: number;
-  goal_id: number;
+  id?: string;
+  goal_id: string;
   title: string;
   explanation: string;
   estimated_duration: string;
@@ -270,9 +270,9 @@ export default function GoalsPage() {
   const [goalForm, setGoalForm] = useState<GoalFormState | null>(null);
   const [msForm,   setMsForm]   = useState<MsFormState | null>(null);
   const [saving,   setSaving]   = useState(false);
-  const [deleting, setDeleting] = useState<Set<number>>(new Set());
+  const [deleting, setDeleting] = useState<Set<string>>(new Set());
   const [confirmGoal, setConfirmGoal] = useState<Goal | null>(null);
-  const [confirmMsId, setConfirmMsId] = useState<number | null>(null);
+  const [confirmMsId, setConfirmMsId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setEntriesLoading(true);
@@ -377,14 +377,14 @@ export default function GoalsPage() {
     setSaving(false);
   }
 
-  async function onMilestoneStatusChange(id: number, status: string) {
+  async function onMilestoneStatusChange(id: string, status: string) {
     try {
       await jsend(`/api/milestones/${id}`, "PATCH", { status });
       setMsList((prev) => prev.map((m) => m.id === id ? { ...m, status: status as Milestone["status"] } : m));
     } catch (e) { setErr((e as Error).message); }
   }
 
-  async function onMilestoneDelete(id: number) {
+  async function onMilestoneDelete(id: string) {
     setConfirmMsId(id);
   }
 

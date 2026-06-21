@@ -14,6 +14,16 @@ interface Settings {
 
 interface VerifyResult { habit: string; type: string; marked: string[]; error?: string }
 
+interface Reminder {
+  id: string;
+  message: string;
+  time: string;
+  days: string;
+  enabled: boolean;
+}
+
+const WD_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
 export default function SettingsPage() {
   const [s, setS]               = useState<Settings | null>(null);
   const [err, setErr]           = useState("");
@@ -28,6 +38,26 @@ export default function SettingsPage() {
   const [pushLoading,   setPushLoading]     = useState(false);
   const [pushErr,       setPushErr]         = useState("");
   const swRef = useRef<ServiceWorkerRegistration | null>(null);
+
+  // PWA install detection
+  const [isStandalone, setIsStandalone] = useState(false);
+  useEffect(() => {
+    setIsStandalone(window.matchMedia("(display-mode: standalone)").matches);
+  }, []);
+
+  // Custom reminders
+  const [reminders,    setReminders]    = useState<Reminder[]>([]);
+  const [rForm,        setRForm]        = useState({ message: "", time: "09:00", days: "daily" });
+  const [rDays,        setRDays]        = useState<number[]>([]);
+  const [rDayMode,     setRDayMode]     = useState<"daily" | "custom">("daily");
+  const [rErr,         setRErr]         = useState("");
+  const [rSaving,      setRSaving]      = useState(false);
+
+  const loadReminders = useCallback(async () => {
+    try { setReminders(await jget<Reminder[]>("/api/reminders")); } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { loadReminders(); }, [loadReminders]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !("serviceWorker" in navigator) || !("PushManager" in window)) return;
@@ -106,6 +136,38 @@ export default function SettingsPage() {
     const bytes   = new Uint8Array(raw.length);
     for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
     return bytes;
+  }
+
+  async function addReminder() {
+    setRErr(""); setRSaving(true);
+    const days = rDayMode === "daily" ? "daily" : rDays.sort().join(",");
+    if (rDayMode === "custom" && rDays.length === 0) { setRErr("Pick at least one day."); setRSaving(false); return; }
+    if (!rForm.message.trim()) { setRErr("Message is required."); setRSaving(false); return; }
+    try {
+      await jsend("/api/reminders", "POST", { message: rForm.message.trim(), time: rForm.time, days });
+      setRForm({ message: "", time: "09:00", days: "daily" });
+      setRDays([]); setRDayMode("daily");
+      await loadReminders();
+    } catch (e) { setRErr((e as Error).message); }
+    setRSaving(false);
+  }
+
+  async function toggleReminder(r: Reminder) {
+    await jsend(`/api/reminders/${r.id}`, "PATCH", { enabled: !r.enabled }).catch(() => {});
+    setReminders(prev => prev.map(x => x.id === r.id ? { ...x, enabled: !x.enabled } : x));
+  }
+
+  async function deleteReminder(r: Reminder) {
+    await jsend(`/api/reminders/${r.id}`, "DELETE").catch(() => {});
+    setReminders(prev => prev.filter(x => x.id !== r.id));
+  }
+
+  function daysLabel(days: string): string {
+    if (days === "daily") return "Every day";
+    const nums = days.split(",").map(Number);
+    if (nums.length === 5 && !nums.includes(0) && !nums.includes(6)) return "Weekdays";
+    if (nums.length === 2 && nums.includes(0) && nums.includes(6)) return "Weekends";
+    return nums.map(n => WD_LABELS[n]).join(", ");
   }
 
   async function confirmImport() {
@@ -211,12 +273,52 @@ export default function SettingsPage() {
         )}
       </div>
 
+      {/* ── Install to home screen ── */}
+      {!isStandalone && (
+        <div className="card stack">
+          <div className="section-title">Install app on your phone</div>
+          <div className="muted small">Add to home screen so push notifications work even when the app is closed.</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div className="stack" style={{ gap: 6 }}>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>Android (Chrome)</div>
+              {[
+                "Open this app in Chrome on your phone",
+                'Tap the 3-dot menu (⋮) → "Add to Home screen"',
+                'Tap "Add" to confirm',
+                "Open the app from your home screen",
+                "Go to Settings → Enable reminders below",
+              ].map((step, i) => (
+                <div key={i} className="row" style={{ gap: 8, fontSize: 12, alignItems: "flex-start" }}>
+                  <span style={{ fontWeight: 700, color: "var(--accent)", flexShrink: 0, width: 16 }}>{i + 1}</span>
+                  <span className="muted">{step}</span>
+                </div>
+              ))}
+            </div>
+            <div className="stack" style={{ gap: 6 }}>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>iPhone (iOS 16.4+ required)</div>
+              {[
+                "Open this app in Safari on your iPhone",
+                'Tap the Share icon (□↑) at the bottom',
+                'Scroll down → tap "Add to Home Screen"',
+                "Open the app from your home screen (not Safari)",
+                "Go to Settings → Enable reminders below",
+              ].map((step, i) => (
+                <div key={i} className="row" style={{ gap: 8, fontSize: 12, alignItems: "flex-start" }}>
+                  <span style={{ fontWeight: 700, color: "var(--accent)", flexShrink: 0, width: 16 }}>{i + 1}</span>
+                  <span className="muted">{step}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Push notifications ── */}
       {pushSupported && (
         <div className="card stack">
           <div className="section-title">Push notifications</div>
           <div className="muted small">
-            Get a daily reminder at 6 AM with your pending habits. Works even when the app is closed (requires browser permission).
+            Enable once from your phone after installing the app to your home screen. Works even when the app is closed.
           </div>
           <div className="row" style={{ gap: 10, alignItems: "center" }}>
             <button
@@ -224,11 +326,92 @@ export default function SettingsPage() {
               onClick={togglePush}
               disabled={pushLoading}
             >
-              {pushLoading ? "…" : pushEnabled ? "Disable reminders" : "Enable daily reminder"}
+              {pushLoading ? "…" : pushEnabled ? "Disable notifications" : "Enable notifications"}
             </button>
-            {pushEnabled && <span className="ok-text" style={{ margin: 0 }}>Reminders active · fires at 6 AM</span>}
+            {pushEnabled && <span className="ok-text" style={{ margin: 0 }}>Active — your phone is subscribed</span>}
             {pushErr && <span className="error-text" style={{ margin: 0 }}>{pushErr}</span>}
           </div>
+        </div>
+      )}
+
+      {/* ── Custom reminders ── */}
+      {pushSupported && (
+        <div className="card stack">
+          <div className="section-title">Custom reminders</div>
+          <div className="muted small">
+            Set timed alerts for anything — "Drink water", "10 LinkedIn connections", "Check emails". Fires at the exact minute on your phone via <strong>cron-job.org</strong> (see setup below).
+          </div>
+
+          {/* Add form */}
+          <div className="stack" style={{ gap: 8, padding: "12px 14px", background: "var(--bg-alt)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)" }}>
+            <div className="form-row">
+              <label className="field" style={{ flex: "2 1 200px" }}>
+                <span className="label">Message</span>
+                <input className="input" placeholder="Drink water now" value={rForm.message} onChange={e => setRForm(f => ({ ...f, message: e.target.value }))} onKeyDown={e => { if (e.key === "Enter") addReminder(); }} />
+              </label>
+              <label className="field" style={{ flex: "0 0 110px" }}>
+                <span className="label">Time (IST)</span>
+                <input className="input" type="time" value={rForm.time} onChange={e => setRForm(f => ({ ...f, time: e.target.value }))} />
+              </label>
+            </div>
+            <div className="field">
+              <span className="label">Days</span>
+              <div className="row" style={{ gap: 6, marginTop: 4 }}>
+                <button type="button" className={`pill${rDayMode === "daily" ? " accent" : ""}`} onClick={() => setRDayMode("daily")} style={{ cursor: "pointer" }}>Every day</button>
+                <button type="button" className={`pill${rDayMode === "custom" ? " accent" : ""}`} onClick={() => setRDayMode("custom")} style={{ cursor: "pointer" }}>Custom</button>
+                {rDayMode === "custom" && WD_LABELS.map((w, i) => (
+                  <button key={i} type="button" className={`pill${rDays.includes(i) ? " accent" : ""}`} onClick={() => setRDays(d => d.includes(i) ? d.filter(x => x !== i) : [...d, i])} style={{ cursor: "pointer" }}>{w}</button>
+                ))}
+              </div>
+            </div>
+            <div className="row" style={{ gap: 8 }}>
+              <button className="btn btn-primary btn-sm" onClick={addReminder} disabled={rSaving}>{rSaving ? "…" : "Add reminder"}</button>
+              {rErr && <span className="error-text" style={{ margin: 0 }}>{rErr}</span>}
+            </div>
+          </div>
+
+          {/* Reminder list */}
+          {reminders.length > 0 && (
+            <div className="stack" style={{ gap: 6 }}>
+              {reminders.map(r => (
+                <div key={r.id} className="spread" style={{ padding: "8px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", opacity: r.enabled ? 1 : 0.5 }}>
+                  <div className="row" style={{ gap: 10 }}>
+                    <span style={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13, color: "var(--accent)" }}>{r.time}</span>
+                    <span style={{ fontWeight: 500, fontSize: 13 }}>{r.message}</span>
+                    <span className="pill" style={{ fontSize: 10 }}>{daysLabel(r.days)}</span>
+                  </div>
+                  <div className="row" style={{ gap: 6 }}>
+                    <button className={`btn btn-sm${r.enabled ? "" : " btn-primary"}`} onClick={() => toggleReminder(r)}>{r.enabled ? "On" : "Off"}</button>
+                    <button className="btn btn-sm btn-danger" onClick={() => deleteReminder(r)}>✕</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {reminders.length === 0 && <div className="muted small">No reminders yet — add one above.</div>}
+
+          {/* cron-job.org setup instructions */}
+          <details style={{ marginTop: 4 }}>
+            <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600, color: "var(--accent)" }}>How to wire up cron-job.org (one-time setup)</summary>
+            <div className="stack" style={{ gap: 8, marginTop: 10 }}>
+              {[
+                <>Go to <strong>cron-job.org</strong> → sign up free</>,
+                <>Click <strong>Create cronjob</strong></>,
+                <>URL: <code className="mono" style={{ fontSize: 11, wordBreak: "break-all" }}>{typeof window !== "undefined" ? window.location.origin : "https://your-app.vercel.app"}/api/push/remind</code></>,
+                <>Schedule: <strong>Every minute</strong> (Schedule → select * for all fields)</>,
+                <>If you have <code className="mono">CRON_SECRET</code> set in .env.local, add a request header: <code className="mono">Authorization: Bearer YOUR_SECRET</code></>,
+                <><strong>Save</strong> — cron-job.org will now ping your app every minute and fire matching reminders</>,
+              ].map((step, i) => (
+                <div key={i} className="row" style={{ gap: 8, fontSize: 12, alignItems: "flex-start" }}>
+                  <span style={{ fontWeight: 700, color: "var(--accent)", flexShrink: 0, minWidth: 16 }}>{i + 1}</span>
+                  <span className="muted">{step}</span>
+                </div>
+              ))}
+              <div className="muted small" style={{ padding: "6px 10px", background: "var(--bg-alt)", borderRadius: 4, borderLeft: "3px solid var(--accent)" }}>
+                All times are in IST (Asia/Kolkata). If your phone shows notifications, the setup is working.
+              </div>
+            </div>
+          </details>
         </div>
       )}
 

@@ -54,8 +54,14 @@ export function validateHabitBody(b: Record<string, unknown>, partial = false) {
       return { error: "verify_config must be JSON." };
     }
   }
-  if (b.goal_id !== undefined) out.goal_id = b.goal_id === null ? null : Number(b.goal_id);
+  if (b.goal_id !== undefined) out.goal_id = b.goal_id === null ? null : String(b.goal_id);
+  if (b.milestone_id !== undefined) out.milestone_id = b.milestone_id === null ? null : String(b.milestone_id);
   if (b.archived !== undefined) out.archived = b.archived ? 1 : 0;
   if (b.why !== undefined) out.why = String(b.why).slice(0, 120);
+  if (b.pause_until !== undefined) {
+    if (b.pause_until === null) out.pause_until = null;
+    else if (/^\d{4}-\d{2}-\d{2}$/.test(String(b.pause_until))) out.pause_until = String(b.pause_until);
+    else return { error: "pause_until must be YYYY-MM-DD or null." };
+  }
   return { value: out };
 }

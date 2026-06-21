@@ -255,6 +255,24 @@ export default function Dashboard() {
 
   const [markingAll, setMarkingAll] = useState(false);
 
+  // MITs
+  const [mitIds, setMitIds] = useState<string[]>([]);
+  const [mitPicker, setMitPicker] = useState(false);
+
+  useEffect(() => {
+    jget<string[]>(`/api/mits?date=${today}`).then(setMitIds).catch(() => {});
+  }, [today]);
+
+  async function saveMits(ids: string[]) {
+    setMitIds(ids);
+    await jsend("/api/mits", "POST", { date: today, mit_ids: ids }).catch(() => {});
+  }
+
+  function toggleMit(id: string) {
+    if (mitIds.includes(id)) { saveMits(mitIds.filter(x => x !== id)); }
+    else if (mitIds.length < 3) { saveMits([...mitIds, id]); }
+  }
+
   async function markAllDone() {
     setMarkingAll(true);
     const pending = todayList.filter((h) => {
@@ -266,7 +284,7 @@ export default function Dashboard() {
       const rest = prev.filter((e) => !pending.some((h) => h.id === e.habit_id && e.date === today));
       return [...rest, ...pending.map((h) => ({
         habit_id: h.id, date: today, status: "done" as const,
-        quantity: null, note: null, source: "manual" as const, created_at: new Date().toISOString(),
+        quantity: null, note: null, source: "manual" as const, duration_minutes: null, created_at: new Date().toISOString(),
       }))];
     });
     try {
@@ -292,7 +310,7 @@ export default function Dashboard() {
     setEntries((prev) => {
       const rest = prev.filter((e) => !(e.habit_id === h.id && e.date === today));
       if (next === null) return rest;
-      return [...rest, { habit_id: h.id, date: today, status: "done", quantity, note: cur?.note ?? null, source: "manual", created_at: new Date().toISOString() }];
+      return [...rest, { habit_id: h.id, date: today, status: "done", quantity, note: cur?.note ?? null, source: "manual", duration_minutes: null, created_at: new Date().toISOString() }];
     });
 
     try {
@@ -479,6 +497,63 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      {/* ── MITs card ── */}
+      <div className="card stack" style={{ gap: 10 }}>
+        <div className="spread">
+          <div>
+            <div className="section-title" style={{ margin: 0 }}>Most Important Tasks</div>
+            <div className="muted small" style={{ marginTop: 2 }}>
+              {mitIds.length === 0 ? "Pick up to 3 MITs for today" : `${mitIds.filter(id => emap.get(ekey(id, today))?.status === "done").length}/${mitIds.length} done`}
+            </div>
+          </div>
+          <button className="btn btn-sm" onClick={() => setMitPicker(p => !p)}>
+            {mitPicker ? "Done" : "Edit MITs"}
+          </button>
+        </div>
+
+        {/* MIT progress */}
+        {mitIds.length > 0 && (
+          <div className="stack" style={{ gap: 6 }}>
+            {mitIds.map(id => {
+              const h = habits.find(x => x.id === id);
+              if (!h) return null;
+              const done = emap.get(ekey(id, today))?.status === "done";
+              return (
+                <div key={id} className="spread" style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid var(--border)", background: done ? "var(--green-soft)" : undefined }}>
+                  <div className="row" style={{ gap: 8 }}>
+                    <span className="cat-dot" style={{ background: categoryColor(h.category) }} />
+                    <span style={{ fontWeight: 500, fontSize: 13, textDecoration: done ? "line-through" : undefined, color: done ? "var(--muted)" : undefined }}>{h.name}</span>
+                  </div>
+                  <span>{done ? "✓" : "○"}</span>
+                </div>
+              );
+            })}
+            <div className="meter">
+              <i style={{ width: `${Math.round((mitIds.filter(id => emap.get(ekey(id, today))?.status === "done").length / mitIds.length) * 100)}%` }} />
+            </div>
+          </div>
+        )}
+
+        {/* Picker */}
+        {mitPicker && (
+          <div className="stack" style={{ gap: 4, borderTop: "1px solid var(--border)", paddingTop: 10 }}>
+            <div className="muted small">Select up to 3 habits from today&apos;s schedule:</div>
+            {todayList.map(h => {
+              const selected = mitIds.includes(h.id);
+              const done = emap.get(ekey(h.id, today))?.status === "done";
+              return (
+                <label key={h.id} className="row" style={{ gap: 8, padding: "4px 8px", borderRadius: 4, cursor: "pointer", background: selected ? "var(--accent-soft)" : undefined }}>
+                  <input type="checkbox" checked={selected} disabled={!selected && mitIds.length >= 3} onChange={() => toggleMit(h.id)} />
+                  <span className="cat-dot" style={{ background: categoryColor(h.category) }} />
+                  <span style={{ fontSize: 13, fontWeight: selected ? 600 : 400, textDecoration: done ? "line-through" : undefined }}>{h.name}</span>
+                  {done && <span className="pill green" style={{ fontSize: 10, marginLeft: "auto" }}>done</span>}
+                </label>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
       {/* ── Main two-column ── */}
       <div className="grid-2 section" style={{ alignItems: "start" }}>

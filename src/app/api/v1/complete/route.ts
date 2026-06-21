@@ -4,7 +4,7 @@ import { localToday } from "@/lib/core";
 
 export const dynamic = "force-dynamic";
 
-// POST { habit: "DSA - 1" } or { habitId: 3 }, optional { date: "YYYY-MM-DD" }
+// POST { habit: "DSA - 1" } or { habitId: "..." }, optional { date: "YYYY-MM-DD" }
 export async function POST(req: NextRequest) {
   if (!await checkApiKey(req.headers.get("authorization")))
     return NextResponse.json({ error: "Unauthorized. Pass Authorization: Bearer <api key>." }, { status: 401 });
@@ -15,8 +15,9 @@ export async function POST(req: NextRequest) {
 
   const habits = await listHabits();
   const q = String(b?.habit ?? "").toLowerCase().trim();
-  const habit = b?.habitId
-    ? habits.find((h) => h.id === Number(b.habitId))
+  const hId = String(b?.habitId ?? "").trim();
+  const habit = hId
+    ? habits.find((h) => h.id === hId)
     : habits.find((h) => h.name.toLowerCase() === q) ?? habits.find((h) => q && h.name.toLowerCase().includes(q));
   if (!habit) return NextResponse.json({ error: "Habit not found. Pass habit (name) or habitId." }, { status: 404 });
 

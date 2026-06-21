@@ -4,10 +4,8 @@ import { listMilestones, createMilestone } from "@/lib/db";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
-  const goalId = req.nextUrl.searchParams.get("goalId");
-  const milestones = goalId
-    ? await listMilestones(Number(goalId))
-    : await listMilestones();
+  const goalId = req.nextUrl.searchParams.get("goalId") ?? undefined;
+  const milestones = await listMilestones(goalId);
   return NextResponse.json(milestones, {
     headers: { "Cache-Control": "private, max-age=30, stale-while-revalidate=300" },
   });
@@ -15,9 +13,9 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   const b = await req.json().catch(() => null);
-  const goalId = Number(b?.goal_id);
+  const goalId = String(b?.goal_id ?? "").trim();
   const title = String(b?.title ?? "").trim();
-  if (!Number.isInteger(goalId) || goalId <= 0 || !title) {
+  if (!goalId || !title) {
     return NextResponse.json({ error: "goal_id and title are required." }, { status: 400 });
   }
   const D = /^\d{4}-\d{2}-\d{2}$/;

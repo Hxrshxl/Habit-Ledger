@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAppData } from "@/components/AppDataProvider";
 import {
   Habit, Entry, Experiment, buildEntryMap, monthRange, statForRange,
-  gradeOf, weekdayMatrix, pairLift, localToday, parseDate, addDays, fmt, pad,
+  gradeOf, weekdayMatrix, pairLift, localToday, parseDate, addDays, fmt, pad, categoryColor,
 } from "@/lib/core";
 import { jget, jsend } from "@/lib/client";
 
@@ -27,7 +27,7 @@ export default function InsightsPage() {
   const [err, setErr] = useState("");
   const [dataLoading, setDataLoading] = useState(true);
   const loading = appLoading || dataLoading;
-  const [expForm, setExpForm] = useState({ name: "", habit_id: 0, a_label: "Condition A", a_from: "", a_to: "", b_label: "Condition B", b_from: "", b_to: "" });
+  const [expForm, setExpForm] = useState({ name: "", habit_id: "", a_label: "Condition A", a_from: "", a_to: "", b_label: "Condition B", b_from: "", b_to: "" });
 
   const load = useCallback(async () => {
     setDataLoading(true);
@@ -90,6 +90,35 @@ export default function InsightsPage() {
   }, [habits, emap, last90from, today]);
 
 
+  // ---- weekly time (last 7 days duration sum per habit) ----
+  const weeklyTime = useMemo(() => {
+    const from7 = fmt(addDays(now, -7));
+    const result: { h: Habit; minutes: number }[] = [];
+    for (const h of habits) {
+      let total = 0;
+      for (const e of entries) {
+        if (e.habit_id === h.id && e.date >= from7 && e.date <= today && e.duration_minutes) {
+          total += e.duration_minutes;
+        }
+      }
+      if (total > 0) result.push({ h, minutes: total });
+    }
+    return result.sort((a, b) => b.minutes - a.minutes);
+  }, [habits, entries, today, now]);
+
+  // ---- network graph edges (unique pairs, |lift| >= 0.1, n >= 14) ----
+  const netEdges = useMemo(() => {
+    const out: { a: Habit; b: Habit; lift: number; n: number }[] = [];
+    for (let i = 0; i < habits.length; i++) {
+      for (let j = i + 1; j < habits.length; j++) {
+        const a = habits[i], b = habits[j];
+        const r = pairLift(a, b, emap, last90from, today);
+        if (r && Math.abs(r.lift) >= 0.1 && r.n >= 14) out.push({ a, b, lift: r.lift, n: r.n });
+      }
+    }
+    return out;
+  }, [habits, emap, last90from, today]);
+
   async function runCoach() {
     setCoachBusy(true); setCoach("");
     try {
@@ -109,7 +138,7 @@ export default function InsightsPage() {
     } catch (e) { setErr((e as Error).message); }
   }
 
-  async function delExp(id: number) {
+  async function delExp(id: string) {
     try { await jsend(`/api/experiments/${id}`, "DELETE"); await load(); } catch (e) { setErr((e as Error).message); }
   }
 
@@ -188,6 +217,98 @@ export default function InsightsPage() {
         )}
       </div>
 
+      {/* Weekly time */}
+      {weeklyTime.length > 0 && (
+        <div className="card stack">
+          <div className="section-title">Time spent — last 7 days</div>
+          <div className="muted small">Logged when you tap &quot;done&quot; and enter minutes. Only habits with time logged appear here.</div>
+          {(() => {
+            const maxMins = Math.max(...weeklyTime.map(r => r.minutes));
+            return (
+              <div className="stack" style={{ gap: 8 }}>
+                {weeklyTime.map(({ h, minutes }) => {
+                  const hrs = Math.floor(minutes / 60);
+                  const mins = minutes % 60;
+                  const label = hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`;
+                  return (
+                    <div key={h.id} className="stack" style={{ gap: 3 }}>
+                      <div className="spread">
+                        <span style={{ fontSize: 13, fontWeight: 500 }}>{h.name}</span>
+                        <span className="muted small">{label}</span>
+                      </div>
+                      <div style={{ height: 8, background: "var(--border)", borderRadius: 4, overflow: "hidden" }}>
+                        <div style={{ height: "100%", width: `${Math.round((minutes / maxMins) * 100)}%`, background: categoryColor(h.category), borderRadius: 4, transition: "width 0.4s" }} />
+                      </div>
+                    </div>
+                  );
+                })}
+                <div className="muted small" style={{ textAlign: "right" }}>
+                  Total: {(() => { const t = weeklyTime.reduce((a, r) => a + r.minutes, 0); const h = Math.floor(t / 60); return h > 0 ? `${h}h ${t % 60}m` : `${t}m`; })()}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* Network graph */}
+      <div className="card stack">
+        <div className="section-title">Habit correlation network</div>
+        <div className="muted small">Green edge = doing A boosts B. Red = negative correlation. Edges appear at ≥10% lift with ≥14 shared days.</div>
+        {netEdges.length === 0 ? (
+          <div className="muted">Not enough correlated pairs yet — keep tracking for ~2 weeks.</div>
+        ) : (() => {
+          // Build unique node set from edges
+          const nodeMap = new Map<string, Habit>();
+          for (const e of netEdges) { nodeMap.set(e.a.id, e.a); nodeMap.set(e.b.id, e.b); }
+          const nodes = [...nodeMap.values()];
+          const n = nodes.length;
+          const CX = 300, CY = 220, R = Math.min(160, 40 * n);
+          const pos = nodes.map((_, i) => ({
+            x: CX + R * Math.cos((2 * Math.PI * i) / n - Math.PI / 2),
+            y: CY + R * Math.sin((2 * Math.PI * i) / n - Math.PI / 2),
+          }));
+          const idxMap = new Map(nodes.map((h, i) => [h.id, i]));
+          return (
+            <svg viewBox={`0 0 600 ${CY * 2 + 80}`} style={{ width: "100%", maxWidth: 600 }}>
+              {/* Edges */}
+              {netEdges.map((e, ei) => {
+                const ai = idxMap.get(e.a.id)!;
+                const bi = idxMap.get(e.b.id)!;
+                const pa = pos[ai], pb = pos[bi];
+                const strokeW = Math.max(1, Math.min(5, Math.abs(e.lift) * 15));
+                return (
+                  <line key={ei}
+                    x1={pa.x} y1={pa.y} x2={pb.x} y2={pb.y}
+                    stroke={e.lift >= 0 ? "var(--green)" : "var(--red)"}
+                    strokeWidth={strokeW} strokeOpacity={0.55}
+                  >
+                    <title>{e.a.name} ↔ {e.b.name}: {e.lift >= 0 ? "+" : ""}{Math.round(e.lift * 100)}% lift</title>
+                  </line>
+                );
+              })}
+              {/* Nodes */}
+              {nodes.map((h, i) => {
+                const p = pos[i];
+                const words = h.name.split(" ").slice(0, 2).join(" ");
+                return (
+                  <g key={h.id}>
+                    <circle cx={p.x} cy={p.y} r={20} fill={categoryColor(h.category)} fillOpacity={0.85} stroke="var(--bg)" strokeWidth={2}>
+                      <title>{h.name}</title>
+                    </circle>
+                    <text x={p.x} y={p.y + 34} textAnchor="middle" fontSize={9} fill="var(--muted)" style={{ userSelect: "none" }}>{words}</text>
+                  </g>
+                );
+              })}
+            </svg>
+          );
+        })()}
+        <div className="row muted small" style={{ gap: 16 }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><span style={{ width: 16, height: 3, background: "var(--green)", borderRadius: 2, display: "inline-block" }} /> Positive lift</span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><span style={{ width: 16, height: 3, background: "var(--red)", borderRadius: 2, display: "inline-block" }} /> Negative lift</span>
+        </div>
+      </div>
+
       {/* Experiments */}
       <div className="card stack">
         <div className="section-title">Self-experiments (A/B)</div>
@@ -219,7 +340,7 @@ export default function InsightsPage() {
         <div className="form-row">
           <label className="field"><span className="label">Name</span><input className="input" value={expForm.name} onChange={(e) => setExpForm({ ...expForm, name: e.target.value })} placeholder="DSA morning vs evening" /></label>
           <label className="field"><span className="label">Habit</span>
-            <select className="select" value={expForm.habit_id} onChange={(e) => setExpForm({ ...expForm, habit_id: Number(e.target.value) })}>
+            <select className="select" value={expForm.habit_id} onChange={(e) => setExpForm({ ...expForm, habit_id: e.target.value })}>
               {habits.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
             </select>
           </label>

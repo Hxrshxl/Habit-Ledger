@@ -23,7 +23,7 @@ import { jget, jsend } from "@/lib/client";
 
 interface FocusItem {
   key: string;
-  habitId: number;
+  habitId: string;
   name: string;
   done: boolean;
   eisenhower: EisenhowerQuadrant | null;
@@ -225,7 +225,7 @@ export default function FocusPage() {
       if (next === null) return rest;
       return [...rest, {
         habit_id: item.habitId, date: today, status: "done",
-        quantity: null, note: null, source: "manual", created_at: new Date().toISOString(),
+        quantity: null, note: null, source: "manual", duration_minutes: null, created_at: new Date().toISOString(),
       }];
     });
     try {
@@ -235,6 +235,54 @@ export default function FocusPage() {
       alert((e as Error).message);
     }
   }
+
+  // ── Pomodoro widget ──────────────────────────────────────────────────────────
+  const WORK_SECS = 25 * 60;
+  const BREAK_SECS = 5 * 60;
+  const [pomOpen,      setPomOpen]      = useState(false);
+  const [pomHabitId,   setPomHabitId]   = useState("");
+  const [pomSecsLeft,  setPomSecsLeft]  = useState(WORK_SECS);
+  const [pomRunning,   setPomRunning]   = useState(false);
+  const [pomPhase,     setPomPhase]     = useState<"work" | "break">("work");
+
+  // Set default habit once today's scheduled list is ready
+  useEffect(() => {
+    const firstToday = habits.find(h => isScheduled(h, today) && emap.get(ekey(h.id, today))?.status !== "done");
+    if (firstToday && !pomHabitId) setPomHabitId(firstToday.id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [habits.length, pomHabitId]);
+
+  useEffect(() => {
+    if (!pomRunning) return;
+    const id = setInterval(() => {
+      setPomSecsLeft(s => {
+        if (s <= 1) {
+          clearInterval(id);
+          setPomRunning(false);
+          if (pomPhase === "work") {
+            // Auto-log the entry
+            if (pomHabitId) {
+              jsend("/api/entries/set", "POST", { habitId: pomHabitId, date: today, status: "done", source: "pomodoro", duration_minutes: 25 }).catch(() => {});
+              setEntries(prev => {
+                const rest = prev.filter(e => !(e.habit_id === pomHabitId && e.date === today));
+                return [...rest, { habit_id: pomHabitId, date: today, status: "done", quantity: null, note: null, source: "pomodoro", duration_minutes: 25, created_at: new Date().toISOString() }];
+              });
+            }
+            setPomPhase("break");
+            return BREAK_SECS;
+          } else {
+            setPomPhase("work");
+            return WORK_SECS;
+          }
+        }
+        return s - 1;
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pomRunning, pomPhase, pomHabitId, today]);
+
+  function pomReset() { setPomRunning(false); setPomPhase("work"); setPomSecsLeft(WORK_SECS); }
 
   if (loading) return <div className="state-note">Loading…</div>;
   if (err)     return <div className="state-note error-text">{err}</div>;
@@ -317,8 +365,68 @@ export default function FocusPage() {
           </div>
         </div>
 
-        {/* ── RIGHT: Today's Priority Stack ── */}
+        {/* ── RIGHT: Pomodoro + Today's Priority Stack ── */}
         <div className="stack" style={{ gap: 12 }}>
+
+          {/* Pomodoro widget */}
+          {(() => {
+            const totalSecs = pomPhase === "work" ? WORK_SECS : BREAK_SECS;
+            const C = 2 * Math.PI * 40;
+            const remaining = pomSecsLeft / totalSecs;
+            const mins = String(Math.floor(pomSecsLeft / 60)).padStart(2, "0");
+            const secs = String(pomSecsLeft % 60).padStart(2, "0");
+            const todayHabits = habits.filter(h => isScheduled(h, today));
+            const isWorkDone = pomPhase === "break" && pomSecsLeft === BREAK_SECS && !pomRunning;
+            return (
+              <div className="card" style={{ padding: "10px 14px" }}>
+                <div className="spread">
+                  <div className="row" style={{ gap: 8 }}>
+                    <span style={{ fontSize: 13, fontWeight: 600 }}>🍅 Pomodoro</span>
+                    {pomPhase === "break" && <span className="pill green" style={{ fontSize: 10 }}>Break</span>}
+                    {isWorkDone && <span className="pill green" style={{ fontSize: 10 }}>Session done ✓</span>}
+                  </div>
+                  <button className="btn btn-sm" onClick={() => setPomOpen(o => !o)}>{pomOpen ? "▲" : "▼"}</button>
+                </div>
+                {pomOpen && (
+                  <div className="stack" style={{ gap: 14, marginTop: 12, alignItems: "center" }}>
+                    {/* Circular ring */}
+                    <svg width={120} height={120} viewBox="-60 -60 120 120">
+                      <circle r={40} fill="none" stroke="var(--border)" strokeWidth={8} />
+                      <circle r={40} fill="none"
+                        stroke={pomPhase === "work" ? "var(--accent)" : "var(--green)"}
+                        strokeWidth={8}
+                        strokeDasharray={`${C}`}
+                        strokeDashoffset={`${C * (1 - remaining)}`}
+                        strokeLinecap="round"
+                        transform="rotate(-90)"
+                        style={{ transition: "stroke-dashoffset 0.9s linear" }}
+                      />
+                      <text x={0} y={6} textAnchor="middle" fontSize={22} fontWeight={700} fill="var(--text)">{mins}:{secs}</text>
+                      <text x={0} y={22} textAnchor="middle" fontSize={9} fill="var(--muted)">{pomPhase === "work" ? "FOCUS" : "BREAK"}</text>
+                    </svg>
+
+                    {/* Habit picker (only in work phase) */}
+                    {pomPhase === "work" && (
+                      <select className="select" value={pomHabitId} onChange={e => setPomHabitId(e.target.value)} style={{ maxWidth: 240 }} disabled={pomRunning}>
+                        <option value="">— Pick a habit —</option>
+                        {todayHabits.map(h => <option key={h.id} value={h.id}>{h.name}</option>)}
+                      </select>
+                    )}
+
+                    {/* Controls */}
+                    <div className="row" style={{ gap: 8 }}>
+                      <button className="btn btn-sm btn-primary"
+                        onClick={() => setPomRunning(r => !r)}
+                        disabled={pomPhase === "work" && !pomHabitId}
+                      >{pomRunning ? "⏸ Pause" : (pomSecsLeft === totalSecs ? "▶ Start" : "▶ Resume")}</button>
+                      <button className="btn btn-sm" onClick={pomReset}>↺ Reset</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
           <div className="section-title" style={{ marginBottom: 0 }}>Today&apos;s Priority</div>
 
           {focusItems.length === 0 && (

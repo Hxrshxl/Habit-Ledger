@@ -2,16 +2,21 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import ThemeToggle from "./ThemeToggle";
 
 const LINKS = [
   { href: "/", label: "Dashboard" },
   { href: "/focus", label: "Focus" },
   { href: "/tracker", label: "Tracker" },
   { href: "/heatmap", label: "Heatmap" },
+  { href: "/calendar", label: "Calendar" },
   { href: "/insights", label: "Insights" },
+  { href: "/journal", label: "Journal" },
   { href: "/goals", label: "Goals" },
   { href: "/review", label: "Review" },
   { href: "/expenses", label: "Expenses" },
+  { href: "/jobs", label: "Jobs" },
+  { href: "/import", label: "Import" },
   { href: "/settings", label: "Settings" },
 ];
 
@@ -28,7 +33,8 @@ export default function Sidebar() {
           {l.label}
         </Link>
       ))}
-      <div className="foot">Local-first · SQLite</div>
+      <ThemeToggle />
+      <div className="foot">Habit Ledger</div>
     </aside>
   );
 }

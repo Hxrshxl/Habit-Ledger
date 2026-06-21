@@ -15,7 +15,7 @@ const WD = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
 interface HabitForm {
-  id?: number;
+  id?: string;
   name: string;
   category: string;
   goal: number;
@@ -28,8 +28,8 @@ interface HabitForm {
   verify_type: "manual" | "leetcode" | "github";
   verify_username: string;
   verify_repo: string;
-  goal_id: number | null;
-  milestone_id: number | null;
+  goal_id: string | null;
+  milestone_id: string | null;
   why: string;
 }
 
@@ -46,14 +46,14 @@ export default function TrackerPage() {
   const now = parseDate(today);
   const [year, setYear] = useState(now.getFullYear());
   const [month0, setMonth0] = useState(now.getMonth());
-  const { habits, goals, milestones, appLoading, refresh: refreshData } = useAppData();
+  const { habits, goals, milestones, appLoading, refresh: refreshData, setHabits } = useAppData();
 
   const [entries, setEntries] = useState<Entry[]>([]);
   const [allEntries, setAllEntries] = useState<Entry[]>([]);
   const [mode, setMode] = useState<Mode>("mark");
   const [form, setForm] = useState<HabitForm | null>(null);
   const [showArchived, setShowArchived] = useState(false);
-  const [menuOpen, setMenuOpen] = useState<number | null>(null);
+  const [menuOpen, setMenuOpen] = useState<string | null>(null);
   const [err, setErr] = useState("");
   const [entriesLoading, setEntriesLoading] = useState(true);
   const loading = appLoading || entriesLoading;
@@ -104,14 +104,20 @@ export default function TrackerPage() {
     if (date > today) return;
     const cur = emap.get(ekey(h.id, date));
 
-    // Note and skip modes use prompts — no useful state to guess optimistically
     if (mode === "note") {
       const note = window.prompt("Note for this day (empty to clear):", cur?.note ?? "");
       if (note === null) return;
+      const newNote = note.trim() || null;
+      const applyNote = (list: Entry[]): Entry[] => {
+        const rest = list.filter((e) => !(e.habit_id === h.id && e.date === date));
+        if (cur?.status == null && newNote === null) return rest;
+        return [...rest, { habit_id: h.id, date, status: cur?.status ?? "done", quantity: cur?.quantity ?? null, note: newNote, source: "manual", duration_minutes: cur?.duration_minutes ?? null, created_at: new Date().toISOString() }];
+      };
+      setEntries((prev) => applyNote(prev));
+      setAllEntries((prev) => applyNote(prev));
       try {
-        await jsend("/api/entries/set", "POST", { habitId: h.id, date, status: cur?.status ?? null, quantity: cur?.quantity ?? null, note: note.trim() || null, source: "manual" });
-        await load();
-      } catch (e) { setErr((e as Error).message); }
+        await jsend("/api/entries/set", "POST", { habitId: h.id, date, status: cur?.status ?? null, quantity: cur?.quantity ?? null, note: newNote, source: "manual" });
+      } catch (e) { setErr((e as Error).message); await load(); }
       return;
     }
     if (mode === "skip") {
@@ -122,35 +128,50 @@ export default function TrackerPage() {
         if (r === null) return;
         if (r.trim()) note = r.trim();
       }
+      const applySkip = (list: Entry[]): Entry[] => {
+        const rest = list.filter((e) => !(e.habit_id === h.id && e.date === date));
+        if (next === null) return rest;
+        return [...rest, { habit_id: h.id, date, status: "skipped", quantity: null, note, source: "manual", duration_minutes: null, created_at: new Date().toISOString() }];
+      };
+      setEntries((prev) => applySkip(prev));
+      setAllEntries((prev) => applySkip(prev));
       try {
         await jsend("/api/entries/set", "POST", { habitId: h.id, date, status: next, quantity: null, note, source: "manual" });
-        await load();
-      } catch (e) { setErr((e as Error).message); }
+      } catch (e) { setErr((e as Error).message); await load(); }
       return;
     }
 
-    // Mark mode — collect quantity if needed, then optimistic update
+    // Mark mode — collect quantity + duration if needed, then optimistic update
     const nextStatus: "done" | null = cur?.status === "done" ? null : "done";
     let quantity: number | null = null;
-    if (nextStatus === "done" && h.quantity_target > 0) {
-      const q = window.prompt(`Quantity (${h.quantity_unit || "units"}, target ${h.quantity_target}):`, String(h.quantity_target));
-      if (q === null) return;
-      const n = Number(q);
-      if (!Number.isFinite(n) || n < 0) { setErr("Invalid quantity"); return; }
-      quantity = n;
+    let duration_minutes: number | null = null;
+    if (nextStatus === "done") {
+      if (h.quantity_target > 0) {
+        const q = window.prompt(`Quantity (${h.quantity_unit || "units"}, target ${h.quantity_target}):`, String(h.quantity_target));
+        if (q === null) return;
+        const n = Number(q);
+        if (!Number.isFinite(n) || n < 0) { setErr("Invalid quantity"); return; }
+        quantity = n;
+      }
+      const dm = window.prompt("Time spent (minutes)? Leave blank to skip.", "");
+      if (dm === null) return;
+      if (dm.trim()) {
+        const n = Number(dm.trim());
+        if (Number.isInteger(n) && n >= 0) duration_minutes = n;
+      }
     }
 
     // Optimistically update both entry lists before the network round-trip
     const applyOptimistic = (list: Entry[]): Entry[] => {
       const rest = list.filter((e) => !(e.habit_id === h.id && e.date === date));
       if (nextStatus === null) return rest;
-      return [...rest, { habit_id: h.id, date, status: "done", quantity, note: cur?.note ?? null, source: "manual", created_at: new Date().toISOString() }];
+      return [...rest, { habit_id: h.id, date, status: "done", quantity, note: cur?.note ?? null, source: "manual", duration_minutes, created_at: new Date().toISOString() }];
     };
     setEntries((prev) => applyOptimistic(prev));
     setAllEntries((prev) => applyOptimistic(prev));
 
     try {
-      await jsend("/api/entries/set", "POST", { habitId: h.id, date, status: nextStatus, quantity, note: cur?.note ?? null, source: "manual" });
+      await jsend("/api/entries/set", "POST", { habitId: h.id, date, status: nextStatus, quantity, note: cur?.note ?? null, source: "manual", duration_minutes });
     } catch (e) {
       setErr((e as Error).message);
       await load(); // roll back on error
@@ -162,8 +183,24 @@ export default function TrackerPage() {
     const i = ids.indexOf(h.id);
     const j = i + dir;
     if (j < 0 || j >= ids.length) return;
+    const posI = visible[i].position;
+    const posJ = visible[j].position;
+    setHabits((hs) => hs.map((x) => {
+      if (x.id === visible[i].id) return { ...x, position: posJ };
+      if (x.id === visible[j].id) return { ...x, position: posI };
+      return x;
+    }));
     [ids[i], ids[j]] = [ids[j], ids[i]];
-    try { await jsend("/api/habits/reorder", "POST", { ids }); await load(true); } catch (e) { setErr((e as Error).message); }
+    try {
+      await jsend("/api/habits/reorder", "POST", { ids });
+    } catch (e) {
+      setErr((e as Error).message);
+      setHabits((hs) => hs.map((x) => {
+        if (x.id === visible[i].id) return { ...x, position: posI };
+        if (x.id === visible[j].id) return { ...x, position: posJ };
+        return x;
+      }));
+    }
   }
 
   function openEdit(h?: Habit) {
@@ -197,15 +234,57 @@ export default function TrackerPage() {
       milestone_id: form.milestone_id,
       why:          form.why.trim(),
     };
-    try {
-      if (form.id) await jsend(`/api/habits/${form.id}`, "PATCH", body);
-      else await jsend(`/api/habits`, "POST", body);
-      setForm(null); await load(true);
-    } catch (e) { setErr((e as Error).message); }
+    if (form.id) {
+      const id = form.id;
+      const prev = habits.find((h) => h.id === id)!;
+      setHabits((hs) => hs.map((h) => h.id === id ? { ...h, ...body } : h));
+      setForm(null);
+      try {
+        const updated = await jsend<Habit>(`/api/habits/${id}`, "PATCH", body);
+        setHabits((hs) => hs.map((h) => h.id === id ? updated : h));
+      } catch (e) {
+        setErr((e as Error).message);
+        setHabits((hs) => hs.map((h) => h.id === id ? prev : h));
+      }
+    } else {
+      const tempId = `temp-${Date.now()}`;
+      const maxPos = habits.reduce((m, h) => Math.max(m, h.position), -1);
+      const tempHabit: Habit = { id: tempId, ...body, position: maxPos + 1, archived: 0, why: body.why, pause_until: null };
+      setHabits((hs) => [...hs, tempHabit]);
+      setForm(null);
+      try {
+        const created = await jsend<Habit>(`/api/habits`, "POST", body);
+        setHabits((hs) => hs.map((h) => h.id === tempId ? created : h));
+      } catch (e) {
+        setErr((e as Error).message);
+        setHabits((hs) => hs.filter((h) => h.id !== tempId));
+      }
+    }
+  }
+
+  async function pauseHabit(h: Habit) {
+    const isPaused = h.pause_until && h.pause_until >= today;
+    if (isPaused) {
+      // Un-pause
+      setHabits((hs) => hs.map((x) => x.id === h.id ? { ...x, pause_until: null } : x));
+      await jsend(`/api/habits/${h.id}`, "PATCH", { pause_until: null }).catch(() => {});
+    } else {
+      const until = window.prompt("Pause until date (YYYY-MM-DD):", fmt(addDays(parseDate(today), 7)));
+      if (!until || !/^\d{4}-\d{2}-\d{2}$/.test(until) || until < today) return;
+      setHabits((hs) => hs.map((x) => x.id === h.id ? { ...x, pause_until: until } : x));
+      await jsend(`/api/habits/${h.id}`, "PATCH", { pause_until: until }).catch(() => {});
+    }
   }
 
   async function archive(h: Habit) {
-    try { await jsend(`/api/habits/${h.id}`, "PATCH", { archived: h.archived ? 0 : 1 }); await load(true); } catch (e) { setErr((e as Error).message); }
+    const newArchived = h.archived ? 0 : 1;
+    setHabits((hs) => hs.map((x) => x.id === h.id ? { ...x, archived: newArchived } : x));
+    try {
+      await jsend(`/api/habits/${h.id}`, "PATCH", { archived: newArchived });
+    } catch (e) {
+      setErr((e as Error).message);
+      setHabits((hs) => hs.map((x) => x.id === h.id ? { ...x, archived: h.archived } : x));
+    }
   }
 
   async function remove(h: Habit) {
@@ -216,7 +295,13 @@ export default function TrackerPage() {
     if (!confirmDelete) return;
     const h = confirmDelete;
     setConfirmDelete(null);
-    try { await jsend(`/api/habits/${h.id}`, "DELETE"); await load(true); } catch (e) { setErr((e as Error).message); }
+    setHabits((hs) => hs.filter((x) => x.id !== h.id));
+    try {
+      await jsend(`/api/habits/${h.id}`, "DELETE");
+    } catch (e) {
+      setErr((e as Error).message);
+      setHabits((hs) => [...hs, h].sort((a, b) => a.position - b.position));
+    }
   }
 
   const dayTotals = useMemo(() => days.map((d) => {
@@ -266,26 +351,34 @@ export default function TrackerPage() {
   async function saveNlPreview() {
     if (!nlPreview) return;
     setNlParsing(true);
-    try {
-      await jsend("/api/habits", "POST", {
-        name:           nlPreview.name,
-        category:       nlPreview.category,
-        frequency_type: nlPreview.frequency_type,
-        weekdays:       nlPreview.weekdays.join(","),
-        times_per_week: nlPreview.times_per_week,
-        interval_days:  nlPreview.interval_days,
-        quantity_target: nlPreview.quantity_target,
-        quantity_unit:  nlPreview.quantity_unit,
-        goal:           30,
-        verify_type:    "manual",
-        verify_config:  "{}",
-        milestone_id:   null,
-        why:            nlPreview.why,
-      });
-      setNlText(""); setNlPreview(null); setNlErr("");
-      await load(true);
-    } catch (e) { setNlErr((e as Error).message); }
+    const body = {
+      name:           nlPreview.name,
+      category:       nlPreview.category,
+      frequency_type: nlPreview.frequency_type,
+      weekdays:       nlPreview.weekdays.join(","),
+      times_per_week: nlPreview.times_per_week,
+      interval_days:  nlPreview.interval_days,
+      quantity_target: nlPreview.quantity_target,
+      quantity_unit:  nlPreview.quantity_unit,
+      goal:           30,
+      verify_type:    "manual" as const,
+      verify_config:  "{}",
+      milestone_id:   null,
+      why:            nlPreview.why,
+    };
+    const tempId = `temp-${Date.now()}`;
+    const maxPos = habits.reduce((m, h) => Math.max(m, h.position), -1);
+    const tempHabit: Habit = { id: tempId, ...body, position: maxPos + 1, archived: 0, goal_id: null, pause_until: null };
+    setHabits((hs) => [...hs, tempHabit]);
+    setNlText(""); setNlPreview(null); setNlErr("");
     setNlParsing(false);
+    try {
+      const created = await jsend<Habit>("/api/habits", "POST", body);
+      setHabits((hs) => hs.map((h) => h.id === tempId ? created : h));
+    } catch (e) {
+      setNlErr((e as Error).message);
+      setHabits((hs) => hs.filter((h) => h.id !== tempId));
+    }
   }
 
   if (loading) return <div className="muted">Loading…</div>;
@@ -485,6 +578,9 @@ export default function TrackerPage() {
                           <button onClick={() => { move(h, 1); setMenuOpen(null); }}>↓ Move down</button>
                           <hr />
                           <button onClick={() => { openEdit(h); setMenuOpen(null); }}>Edit</button>
+                          <button onClick={() => { pauseHabit(h); setMenuOpen(null); }}>
+                            {h.pause_until && h.pause_until >= today ? `Resume (paused til ${h.pause_until})` : "Pause (vacation)"}
+                          </button>
                           <button onClick={() => { archive(h); setMenuOpen(null); }}>
                             {h.archived ? "Unarchive" : "Archive"}
                           </button>
@@ -587,7 +683,7 @@ export default function TrackerPage() {
               <input className="input" placeholder="problems / litres / pages" value={form.quantity_unit} onChange={(e) => setForm({ ...form, quantity_unit: e.target.value })} />
             </label>
             <label className="field"><span className="label">Linked milestone</span>
-              <select className="select" value={form.milestone_id ?? ""} onChange={(e) => setForm({ ...form, milestone_id: e.target.value ? Number(e.target.value) : null })}>
+              <select className="select" value={form.milestone_id ?? ""} onChange={(e) => setForm({ ...form, milestone_id: e.target.value || null })}>
                 <option value="">— none —</option>
                 {goals.map((g) => {
                   const gMs = milestones.filter((m) => m.goal_id === g.id);

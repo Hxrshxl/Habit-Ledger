@@ -5,9 +5,9 @@ export const dynamic = "force-dynamic";
 type Params = { params: Promise<{ id: string }> };
 
 export async function PATCH(req: NextRequest, { params }: Params) {
-  const id = Number((await params).id);
+  const id = (await params).id;
   const b = await req.json().catch(() => null);
-  if (!Number.isInteger(id) || !b) return NextResponse.json({ error: "Bad request." }, { status: 400 });
+  if (!id || !b) return NextResponse.json({ error: "Bad request." }, { status: 400 });
   const D = /^\d{4}-\d{2}-\d{2}$/;
   const fields: Parameters<typeof updateMilestone>[1] = {};
   if (b.title              !== undefined) fields.title              = String(b.title).trim().slice(0, 150);
@@ -22,8 +22,8 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 }
 
 export async function DELETE(_req: NextRequest, { params }: Params) {
-  const id = Number((await params).id);
-  if (!Number.isInteger(id)) return NextResponse.json({ error: "Bad request." }, { status: 400 });
+  const id = (await params).id;
+  if (!id) return NextResponse.json({ error: "Bad request." }, { status: 400 });
   await deleteMilestone(id);
   return NextResponse.json({ deleted: true });
 }

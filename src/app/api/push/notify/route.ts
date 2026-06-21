@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import webpush from "web-push";
-import { listPushSubs, deletePushSub, listHabits, entriesForRange } from "@/lib/db";
+import { listPushSubs, deletePushSub, listHabits, entriesForRange, getSetting } from "@/lib/db";
 import { isScheduled, localToday, buildEntryMap, ekey } from "@/lib/core";
 
 export const dynamic = "force-dynamic";
@@ -42,12 +42,23 @@ export async function POST(req: NextRequest) {
   const subs = await listPushSubs();
   if (subs.length === 0) return NextResponse.json({ sent: 0 });
 
+  const title = pending.length === 0 ? "All done today! 🎉" : `${pending.length} habit${pending.length !== 1 ? "s" : ""} pending`;
+  const body  = pending.length === 0
+    ? "You completed everything on your list."
+    : pending.slice(0, 3).map((h) => `· ${h.name}`).join("\n") + (pending.length > 3 ? `\n· +${pending.length - 3} more` : "");
+
+  // Include habit_id + api_key in payload when exactly one habit is pending
+  // so the service worker can offer a "Mark Done" action button
+  const apiKey = pending.length === 1 ? await getSetting("api_key") : null;
   const payload = JSON.stringify({
-    title: pending.length === 0 ? "All done today! 🎉" : `${pending.length} habit${pending.length !== 1 ? "s" : ""} pending`,
-    body: pending.length === 0
-      ? "You completed everything on your list."
-      : pending.slice(0, 3).map((h) => `· ${h.name}`).join("\n") + (pending.length > 3 ? `\n· +${pending.length - 3} more` : ""),
+    title,
+    body,
     url: "/",
+    ...(pending.length === 1 && apiKey ? {
+      habit_id: pending[0].id,
+      api_key: apiKey,
+      actions: [{ action: "mark-done", title: "✓ Mark Done" }],
+    } : {}),
   });
 
   let sent = 0;

@@ -8,7 +8,7 @@ export type VerifyType = "manual" | "leetcode" | "github";
 export type EntryStatus = "done" | "skipped";
 
 export interface Habit {
-  id: number;
+  id: string;
   name: string;
   category: string;
   goal: number; // monthly target (daily habits); per-week target for weekly habits lives in times_per_week
@@ -19,21 +19,23 @@ export interface Habit {
   quantity_unit: string;
   verify_type: VerifyType;
   verify_config: string; // JSON: { username, repo? }
-  goal_id: number | null;       // deprecated: old link to goals-as-milestones
-  milestone_id: number | null;  // new: links to milestones.id
+  goal_id: string | null;
+  milestone_id: string | null;
   interval_days: number;        // used when frequency_type === 'interval' (e.g. 14 = every 2 weeks)
   position: number;
   archived: number;
   why: string; // one-line reason, e.g. "→ Razorpay backend interview"
+  pause_until: string | null;  // YYYY-MM-DD: habit not scheduled on or before this date
 }
 
 export interface Entry {
-  habit_id: number;
+  habit_id: string;
   date: string; // YYYY-MM-DD
   status: EntryStatus;
   quantity: number | null;
   note: string | null;
-  source: string; // manual | api | leetcode | github | telegram
+  source: string; // manual | api | leetcode | github | telegram | pomodoro
+  duration_minutes: number | null;
   created_at: string;
 }
 
@@ -42,6 +44,7 @@ export interface ContextDay {
   mood: number | null; // 1-5
   energy: number | null; // 1-5
   sleep_hours: number | null;
+  notes: string | null;
 }
 
 export type GoalStatus       = "active" | "completed" | "paused" | "stalled";
@@ -51,11 +54,11 @@ export type MilestoneStatus  = "pending" | "active" | "completed";
 export type EisenhowerQuadrant = "do" | "schedule" | "delegate" | "eliminate";
 
 export interface Goal {
-  id: number;
+  id: string;
   name: string;
   description: string;
   target_date: string | null;
-  parent_id: number | null;   // deprecated, kept for DB compat
+  parent_id: string | null;   // deprecated, kept for DB compat
   created_at: string | null;
   // new fields (default-valued in migrations)
   category: string;
@@ -98,8 +101,8 @@ export function deadlineUrgency(
 }
 
 export interface Milestone {
-  id: number;
-  goal_id: number;
+  id: string;
+  goal_id: string;
   title: string;
   explanation: string;
   estimated_duration: string;
@@ -248,7 +251,7 @@ export function isEscalatedToday(
 }
 
 export interface WeeklyReview {
-  id: number;
+  id: string;
   week_start: string;   // YYYY-MM-DD (Monday)
   went_well: string;
   got_in_way: string;
@@ -257,9 +260,9 @@ export interface WeeklyReview {
 }
 
 export interface Experiment {
-  id: number;
+  id: string;
   name: string;
-  habit_id: number;
+  habit_id: string;
   a_label: string;
   a_from: string;
   a_to: string;
@@ -287,7 +290,8 @@ export function addDays(d: Date, n: number): Date {
 }
 
 export function localToday(): string {
-  return fmt(new Date());
+  // Intl ensures correct IST date on Vercel (UTC) servers and locally
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
 }
 
 const DAYS_PER_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
@@ -334,6 +338,7 @@ export function* eachDay(from: string, to: string): Generator<string> {
 const INTERVAL_EPOCH = "2024-01-01";
 
 export function isScheduled(h: Habit, dateStr: string): boolean {
+  if (h.pause_until && dateStr <= h.pause_until) return false;
   if (h.frequency_type === "daily") return true;
   if (h.frequency_type === "weekly") return true; // any day counts toward weekly target
   if (h.frequency_type === "interval") {
@@ -372,7 +377,7 @@ export function monthRange(year: number, month0: number): { from: string; to: st
 
 // ---------------- Entry map ----------------
 
-export const ekey = (habitId: number, date: string) => `${habitId}|${date}`;
+export const ekey = (habitId: string, date: string) => `${habitId}|${date}`;
 
 export function buildEntryMap(entries: Entry[]): Map<string, Entry> {
   const m = new Map<string, Entry>();
@@ -409,7 +414,7 @@ export function computeStreak(h: Habit, emap: Map<string, Entry>, today: string,
   if (!startHint) {
     for (const k of emap.keys()) {
       const p = k.indexOf("|");
-      if (Number(k.slice(0, p)) === h.id) { const date = k.slice(p + 1); if (date < earliest) earliest = date; }
+      if (k.slice(0, p) === h.id) { const date = k.slice(p + 1); if (date < earliest) earliest = date; }
     }
   }
   const start = earliest < today ? earliest : fmt(addDays(parseDate(today), -365));
@@ -472,16 +477,16 @@ function weeklyStreak(h: Habit, emap: Map<string, Entry>, today: string): Streak
 }
 
 /** Compute streaks for all habits in one pass (O(E) emap scan instead of O(H×E)). */
-export function computeStreakBatch(habits: Habit[], emap: Map<string, Entry>, today: string): Map<number, StreakInfo> {
-  const earliest = new Map<number, string>();
+export function computeStreakBatch(habits: Habit[], emap: Map<string, Entry>, today: string): Map<string, StreakInfo> {
+  const earliest = new Map<string, string>();
   for (const k of emap.keys()) {
     const p = k.indexOf("|");
-    const id = Number(k.slice(0, p));
+    const id = k.slice(0, p);
     const date = k.slice(p + 1);
     const prev = earliest.get(id);
     if (!prev || date < prev) earliest.set(id, date);
   }
-  const result = new Map<number, StreakInfo>();
+  const result = new Map<string, StreakInfo>();
   for (const h of habits) result.set(h.id, computeStreak(h, emap, today, earliest.get(h.id)));
   return result;
 }
@@ -608,7 +613,7 @@ export interface Badge {
 export function computeBadges(
   habits: Habit[],
   emap: Map<string, Entry>,
-  streaks: Map<number, StreakInfo>,
+  streaks: Map<string, StreakInfo>,
   allEntries: Entry[]
 ): Badge[] {
   const totalDone = allEntries.filter((e) => e.status === "done").length;

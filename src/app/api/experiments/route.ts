@@ -11,8 +11,8 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   const b = await req.json().catch(() => null);
   const name = String(b?.name ?? "").trim();
-  const habitId = Number(b?.habit_id);
-  if (!name || !Number.isInteger(habitId) || !await getHabit(habitId))
+  const habitId = String(b?.habit_id ?? "").trim();
+  if (!name || !habitId || !await getHabit(habitId))
     return NextResponse.json({ error: "name and a valid habit_id are required." }, { status: 400 });
   for (const k of ["a_from", "a_to", "b_from", "b_to"])
     if (!D.test(String(b?.[k] ?? ""))) return NextResponse.json({ error: `${k} must be YYYY-MM-DD.` }, { status: 400 });

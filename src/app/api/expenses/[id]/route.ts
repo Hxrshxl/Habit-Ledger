@@ -6,8 +6,8 @@ export const dynamic = "force-dynamic";
 type Params = { params: Promise<{ id: string }> };
 
 export async function PATCH(req: NextRequest, { params }: Params) {
-  const id = Number((await params).id);
-  if (!Number.isInteger(id)) return NextResponse.json({ error: "Invalid id." }, { status: 400 });
+  const id = (await params).id;
+  if (!id) return NextResponse.json({ error: "Invalid id." }, { status: 400 });
   const b = await req.json().catch(() => null);
   if (!b) return NextResponse.json({ error: "Invalid JSON." }, { status: 400 });
 
@@ -28,8 +28,8 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 }
 
 export async function DELETE(_req: NextRequest, { params }: Params) {
-  const id = Number((await params).id);
-  if (!Number.isInteger(id) || !await deleteExpense(id))
+  const id = (await params).id;
+  if (!id || !await deleteExpense(id))
     return NextResponse.json({ error: "Expense not found." }, { status: 404 });
   return NextResponse.json({ deleted: true });
 }

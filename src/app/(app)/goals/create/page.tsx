@@ -409,7 +409,7 @@ export default function GoalCreatePage() {
     setSaving(true); setSaveErr("");
     try {
       // 1. Create goal
-      const goal = await jsend<{ id: number }>("/api/goals", "POST", {
+      const goal = await jsend<{ id: string }>("/api/goals", "POST", {
         name:        title.trim(),
         description: description.trim(),
         category,
@@ -421,9 +421,9 @@ export default function GoalCreatePage() {
       });
 
       // 2. Create milestones sequentially (need IDs), then habits in parallel
-      const milestonesWithHabits: { id: number; habits: GeneratedHabit[] }[] = [];
+      const milestonesWithHabits: { id: string; habits: GeneratedHabit[] }[] = [];
       for (const ms of plan.milestones) {
-        const milestone = await jsend<{ id: number }>("/api/milestones", "POST", {
+        const milestone = await jsend<{ id: string }>("/api/milestones", "POST", {
           goal_id:            goal.id,
           title:              ms.title.trim(),
           explanation:        ms.explanation,
