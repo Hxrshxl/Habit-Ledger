@@ -334,18 +334,18 @@ export function* eachDay(from: string, to: string): Generator<string> {
 
 // ---------------- Scheduling ----------------
 
-// Fixed epoch (a Monday) used as reference for interval scheduling
+// Fixed epoch used as reference for interval scheduling
 const INTERVAL_EPOCH = "2024-01-01";
+// Pre-computed ms — avoids a Date allocation on every isScheduled() call with interval type
+const INTERVAL_EPOCH_MS = parseDate(INTERVAL_EPOCH).getTime();
 
 export function isScheduled(h: Habit, dateStr: string): boolean {
   if (h.pause_until && dateStr <= h.pause_until) return false;
   if (h.frequency_type === "daily") return true;
   if (h.frequency_type === "weekly") return true; // any day counts toward weekly target
   if (h.frequency_type === "interval") {
-    const ref    = parseDate(INTERVAL_EPOCH);
-    const target = parseDate(dateStr);
-    const diff   = Math.round((target.getTime() - ref.getTime()) / 86400000);
-    const n      = h.interval_days > 0 ? h.interval_days : 7;
+    const diff = Math.round((parseDate(dateStr).getTime() - INTERVAL_EPOCH_MS) / 86400000);
+    const n    = h.interval_days > 0 ? h.interval_days : 7;
     return diff >= 0 && diff % n === 0;
   }
   const set = h.weekdays
@@ -452,7 +452,10 @@ function weeklyStreak(h: Habit, emap: Map<string, Entry>, today: string): Streak
   const start = fmt(addDays(parseDate(today), -371));
   for (const d of eachDay(start, today)) {
     const e = emap.get(ekey(h.id, d));
-    if (e?.status === "done") perWeek.set(weekKey(d), (perWeek.get(weekKey(d)) ?? 0) + 1);
+    if (e?.status === "done") {
+      const wk = weekKey(d);
+      perWeek.set(wk, (perWeek.get(wk) ?? 0) + 1);
+    }
   }
   const thisWeek = weekKey(today);
   const weeks: string[] = [];
@@ -512,8 +515,9 @@ export function statForRange(h: Habit, emap: Map<string, Entry>, from: string, t
     if (e?.status === "done") done++;
     else if (e?.status === "skipped") skipped++;
   }
-  const target = Math.max(1, targetInRange(h, from, to) - 0) ;
-  const effectiveTarget = Math.max(1, targetInRange(h, from, to) - skippedReduction(h, skipped));
+  const rawTarget = targetInRange(h, from, to);
+  const target = Math.max(1, rawTarget);
+  const effectiveTarget = Math.max(1, rawTarget - skippedReduction(h, skipped));
   const pct = Math.min(100, Math.round((done / effectiveTarget) * 100));
   return { done, skipped, scheduled, target, pct };
 }

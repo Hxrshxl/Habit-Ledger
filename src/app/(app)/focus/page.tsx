@@ -8,7 +8,7 @@ import {
   buildEntryMap, ekey, isScheduled, localToday, parseDate, fmt, addDays,
   goalProgress, goalHealth, deadlineUrgency,
   EISENHOWER_QUADRANTS, EisenhowerQuadrant,
-  isEscalatedToday, weekKey, eachDay,
+  isEscalatedToday, computeStreakBatch,
 } from "@/lib/core";
 import { jget, jsend } from "@/lib/client";
 
@@ -125,8 +125,7 @@ function QuadrantCell({
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function FocusPage() {
-  const today  = localToday();
-  const weekStart = weekKey(today);
+  const today = localToday();
 
   const { habits: allHabits, goals, milestones, appLoading } = useAppData();
   const habits = allHabits.filter(h => !h.archived);
@@ -136,14 +135,17 @@ export default function FocusPage() {
   const [err,        setErr]        = useState("");
   const loading = appLoading || entriesLoading;
 
+  // Fetch 90 days so streak computation is accurate (not bounded by a single week).
+  const entriesFrom = fmt(addDays(parseDate(today), -90));
+
   const load = useCallback(async () => {
     setEntriesLoading(true);
     try {
-      const es = await jget<Entry[]>(`/api/entries?from=${weekStart}&to=${today}`);
+      const es = await jget<Entry[]>(`/api/entries?from=${entriesFrom}&to=${today}`);
       setEntries(es); setErr("");
     } catch (e) { setErr((e as Error).message); }
     setEntriesLoading(false);
-  }, [today, weekStart]);
+  }, [today, entriesFrom]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -151,6 +153,8 @@ export default function FocusPage() {
 
   // Build today's focus list
   const focusItems = useMemo<FocusItem[]>(() => {
+    // Compute streaks for all habits in one O(entries) pass
+    const streakMap = computeStreakBatch(habits, emap, today);
     const items: FocusItem[] = [];
 
     for (const h of habits) {
@@ -173,14 +177,7 @@ export default function FocusPage() {
       // Deadline urgency from linked milestone
       const dlInfo = ms ? deadlineUrgency(ms.target_date, today) : null;
 
-      // Streak (simple: count consecutive done days ending today)
-      let streak = 0;
-      for (let i = 0; i < 60; i++) {
-        const d = fmt(addDays(parseDate(today), -i));
-        if (emap.get(ekey(h.id, d))?.status === "done") streak++;
-        else if (i > 0) break; // gap — stop (today might not be done yet, that's ok for i=0)
-      }
-      if (!done) streak = Math.max(0, streak - 0); // don't count today if not done
+      const streak = streakMap.get(h.id)?.current ?? 0;
 
       // Compute tier
       let tier: number;
@@ -231,7 +228,7 @@ export default function FocusPage() {
     try {
       await jsend("/api/entries/set", "POST", { habitId: item.habitId, date: today, status: next, quantity: null });
     } catch (e) {
-      setEntries(await jget<Entry[]>(`/api/entries?from=${weekStart}&to=${today}`));
+      setEntries(await jget<Entry[]>(`/api/entries?from=${entriesFrom}&to=${today}`));
       alert((e as Error).message);
     }
   }

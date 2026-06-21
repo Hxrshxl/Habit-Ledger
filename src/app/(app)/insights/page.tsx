@@ -78,17 +78,27 @@ export default function InsightsPage() {
   // ---- weekday matrix over last 90 days ----
   const wkRows = useMemo(() => habits.map((h) => ({ h, m: weekdayMatrix(h, emap, last90from, today) })), [habits, emap, last90from, today]);
 
-  // ---- pair lifts (top 6 by |lift|) ----
-  const lifts = useMemo(() => {
-    const out: { a: Habit; b: Habit; lift: number; baseB: number; condB: number; n: number }[] = [];
-    for (const a of habits) for (const b of habits) {
-      if (a.id === b.id) continue;
-      const r = pairLift(a, b, emap, last90from, today);
-      if (r) out.push({ a, b, ...r });
+  // ---- pair lifts + network edges (computed together to halve pairLift calls) ----
+  // Original: n*(n-1) directed calls for lifts + n*(n-1)/2 calls for netEdges = 3n(n-1)/2 total.
+  // Merged:   n*(n-1)/2 unique pairs, each yields ab + ba  = n*(n-1) calls total (~33% fewer).
+  const { lifts, netEdges } = useMemo(() => {
+    const directed: { a: Habit; b: Habit; lift: number; baseB: number; condB: number; n: number }[] = [];
+    const undirected: { a: Habit; b: Habit; lift: number; n: number }[] = [];
+    for (let i = 0; i < habits.length; i++) {
+      for (let j = i + 1; j < habits.length; j++) {
+        const a = habits[i], b = habits[j];
+        const ab = pairLift(a, b, emap, last90from, today);
+        const ba = pairLift(b, a, emap, last90from, today);
+        if (ab) directed.push({ a, b, ...ab });
+        if (ba) directed.push({ a: b, b: a, ...ba });
+        if (ab && Math.abs(ab.lift) >= 0.1 && ab.n >= 14) undirected.push({ a, b, lift: ab.lift, n: ab.n });
+      }
     }
-    return out.sort((x, y) => Math.abs(y.lift) - Math.abs(x.lift)).slice(0, 6);
+    return {
+      lifts: directed.sort((x, y) => Math.abs(y.lift) - Math.abs(x.lift)).slice(0, 6),
+      netEdges: undirected,
+    };
   }, [habits, emap, last90from, today]);
-
 
   // ---- weekly time (last 7 days duration sum per habit) ----
   const weeklyTime = useMemo(() => {
@@ -106,18 +116,6 @@ export default function InsightsPage() {
     return result.sort((a, b) => b.minutes - a.minutes);
   }, [habits, entries, today, now]);
 
-  // ---- network graph edges (unique pairs, |lift| >= 0.1, n >= 14) ----
-  const netEdges = useMemo(() => {
-    const out: { a: Habit; b: Habit; lift: number; n: number }[] = [];
-    for (let i = 0; i < habits.length; i++) {
-      for (let j = i + 1; j < habits.length; j++) {
-        const a = habits[i], b = habits[j];
-        const r = pairLift(a, b, emap, last90from, today);
-        if (r && Math.abs(r.lift) >= 0.1 && r.n >= 14) out.push({ a, b, lift: r.lift, n: r.n });
-      }
-    }
-    return out;
-  }, [habits, emap, last90from, today]);
 
   async function runCoach() {
     setCoachBusy(true); setCoach("");

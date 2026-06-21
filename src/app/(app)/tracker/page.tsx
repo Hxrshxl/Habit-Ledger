@@ -79,8 +79,12 @@ export default function TrackerPage() {
     setEntriesLoading(true);
     try {
       const fetches: Promise<unknown>[] = [
-        jget<Entry[]>(`/api/entries?from=${from}&to=${to}`).then(setEntries),
-        jget<Entry[]>(`/api/entries?from=${twoYearsAgo}&to=${today}`).then(setAllEntries),
+        // Fetch the full 2-year range once; filter client-side for the current month view.
+        // This saves one HTTP round-trip vs fetching month + full-range separately.
+        jget<Entry[]>(`/api/entries?from=${twoYearsAgo}&to=${today}`).then((all) => {
+          setAllEntries(all);
+          setEntries(all.filter((e) => e.date >= from && e.date <= to));
+        }),
       ];
       if (refreshHabits) fetches.push(refreshData());
       await Promise.all(fetches);

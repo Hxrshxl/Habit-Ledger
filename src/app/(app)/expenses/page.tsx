@@ -2,13 +2,14 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { jget, jsend } from "@/lib/client";
+import { extractMerchantName } from "@/lib/expenses";
 
 /* ── Types ── */
 interface Expense {
-  id: number; date: string; name: string; amount: number;
+  id: string; date: string; name: string; amount: number;
   type: "expense" | "credit"; category: string; note: string | null;
 }
-interface Budget { id: number; month: string; category: string; amount: number; }
+interface Budget { id: string; month: string; category: string; amount: number; }
 interface PendingTx {
   _id: number; date: string; name: string; amount: string;
   type: "expense" | "credit"; category: string; selected: boolean;
@@ -136,9 +137,54 @@ export default function ExpensesPage() {
     setSaving(false);
   }
 
-  async function deleteExp(id: number) {
+  async function deleteExp(id: string) {
     await fetch(`/api/expenses/${id}`, { method: "DELETE" });
     setExpenses(prev => prev.filter(e => e.id !== id));
+  }
+
+  /* ── Inline row edit ── */
+  const [editId,     setEditId]     = useState<string | null>(null);
+  const [editDraft,  setEditDraft]  = useState<Expense | null>(null);
+  const [editAmtStr, setEditAmtStr] = useState("");
+  const [savedId,    setSavedId]    = useState<string | null>(null);
+  const [editErr,    setEditErr]    = useState("");
+
+  function startEdit(exp: Expense) {
+    setEditId(exp.id);
+    setEditDraft({ ...exp });
+    setEditAmtStr(String(exp.amount));
+    setEditErr("");
+  }
+
+  function cancelEdit() {
+    setEditId(null);
+    setEditDraft(null);
+    setEditErr("");
+  }
+
+  async function saveEdit() {
+    if (!editDraft || !editId) return;
+    const amount = parseFloat(editAmtStr);
+    if (!editDraft.name?.trim()) { setEditErr("Name is required."); return; }
+    if (!isFinite(amount) || amount <= 0) { setEditErr("Invalid amount."); return; }
+    try {
+      const updated = await jsend<Expense>(`/api/expenses/${editId}`, "PATCH", {
+        name:     editDraft.name.trim(),
+        amount,
+        date:     editDraft.date,
+        type:     editDraft.type,
+        category: editDraft.category,
+        note:     editDraft.note || null,
+      });
+      setExpenses(prev => prev.map(e => e.id === editId ? updated : e));
+      setEditId(null);
+      setEditDraft(null);
+      setEditErr("");
+      setSavedId(updated.id);
+      setTimeout(() => setSavedId(null), 1500);
+    } catch (err: unknown) {
+      setEditErr(err instanceof Error ? err.message : "Failed to save.");
+    }
   }
 
   async function saveBudgets() {
@@ -434,19 +480,105 @@ export default function ExpensesPage() {
                     {fmt(items.filter(x => x.type === "expense").reduce((s, x) => s + x.amount, 0))}
                   </span>
                 </div>
-                {items.map(exp => (
-                  <div key={exp.id} className="exp-item">
-                    <span className="exp-cat-dot" style={{ background: catColor(exp.category) }} />
-                    <div className="exp-item-info">
-                      <div className="exp-item-name">{exp.name}</div>
-                      <div className="exp-item-cat">{exp.category}{exp.note ? ` · ${exp.note}` : ""}</div>
+                {items.map(exp => {
+                  const isEditing = editId === exp.id;
+                  return (
+                    <div
+                      key={exp.id}
+                      className={`exp-item${isEditing ? " editing" : ""}`}
+                      onKeyDown={e => {
+                        if (!isEditing) return;
+                        if (e.key === "Escape") cancelEdit();
+                        if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) saveEdit();
+                      }}
+                    >
+                      <span
+                        className="exp-cat-dot"
+                        style={{ background: catColor(isEditing ? editDraft!.category : exp.category) }}
+                      />
+
+                      {isEditing && editDraft ? (
+                        <div className="exp-inline-edit">
+                          <input
+                            className="edit-name"
+                            value={editDraft.name}
+                            onChange={e => setEditDraft(d => d && { ...d, name: e.target.value })}
+                            placeholder="Name"
+                            autoFocus
+                          />
+                          <input
+                            className="edit-amount"
+                            type="number" min="0.01" step="0.01"
+                            value={editAmtStr}
+                            onChange={e => setEditAmtStr(e.target.value)}
+                            placeholder="Amount"
+                          />
+                          <input
+                            className="edit-date"
+                            type="date"
+                            value={editDraft.date}
+                            max={todayStr()}
+                            onChange={e => setEditDraft(d => d && { ...d, date: e.target.value })}
+                          />
+                          <select
+                            className="edit-cat"
+                            value={editDraft.category}
+                            onChange={e => setEditDraft(d => d && { ...d, category: e.target.value })}
+                          >
+                            {allCats.map(c => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => setEditDraft(d => d && { ...d, type: d.type === "expense" ? "credit" : "expense" })}
+                            style={{
+                              fontSize: 11, padding: "3px 8px", borderRadius: 99, border: "1px solid",
+                              background: editDraft.type === "expense" ? "var(--red-soft)" : "var(--green-soft)",
+                              color:      editDraft.type === "expense" ? "var(--red)"      : "var(--green)",
+                              borderColor:editDraft.type === "expense" ? "var(--red)"      : "var(--green)",
+                              cursor: "pointer", flexShrink: 0,
+                            }}
+                          >
+                            {editDraft.type === "expense" ? "−Exp" : "+Crd"}
+                          </button>
+                          <input
+                            className="edit-note"
+                            value={editDraft.note ?? ""}
+                            onChange={e => setEditDraft(d => d && { ...d, note: e.target.value || null })}
+                            placeholder="Note (optional)"
+                          />
+                          {editErr && <p className="exp-edit-err">{editErr}</p>}
+                          <div className="exp-edit-btns">
+                            <button
+                              onClick={saveEdit}
+                              title="Save (Ctrl+Enter)"
+                              style={{ background: "var(--green)", color: "#fff", border: "none", borderRadius: 4, padding: "3px 10px", fontSize: 12, cursor: "pointer" }}
+                            >✓</button>
+                            <button
+                              onClick={cancelEdit}
+                              title="Cancel (Esc)"
+                              style={{ background: "none", border: "1px solid var(--border-strong)", borderRadius: 4, padding: "3px 10px", fontSize: 12, cursor: "pointer", color: "var(--muted)" }}
+                            >✕</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="exp-item-info" style={{ cursor: "pointer" }} onClick={() => startEdit(exp)}>
+                            <div className="exp-item-name">{extractMerchantName(exp.name)}</div>
+                            <div className="exp-item-cat">{exp.category}{exp.note ? ` · ${exp.note}` : ""}</div>
+                          </div>
+                          <span className={`exp-item-amount ${exp.type === "credit" ? "credit" : "debit"}`}>
+                            {savedId === exp.id
+                              ? <span style={{ color: "var(--green)", fontWeight: 700 }}>✓</span>
+                              : <>{exp.type === "credit" ? "+" : "−"}{fmt(exp.amount)}</>
+                            }
+                          </span>
+                          <button className="exp-item-edit" title="Edit" onClick={() => startEdit(exp)}>✎</button>
+                          <button className="exp-item-del" title="Delete" onClick={() => deleteExp(exp.id)}>×</button>
+                        </>
+                      )}
                     </div>
-                    <span className={`exp-item-amount ${exp.type === "credit" ? "credit" : "debit"}`}>
-                      {exp.type === "credit" ? "+" : "−"}{fmt(exp.amount)}
-                    </span>
-                    <button className="exp-item-del" title="Delete" onClick={() => deleteExp(exp.id)}>×</button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ))}
           </div>

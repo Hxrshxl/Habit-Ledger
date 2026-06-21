@@ -320,14 +320,14 @@ export async function setEntry(habitId: string, date: string, input: EntryInput)
   }
 
   const status = next.status ?? "done";
+  const writtenAt = new Date().toISOString();
   await col.updateOne(
     { habit_id: habitId, date },
-    { $set: { habit_id: habitId, date, status, quantity: next.quantity, note: next.note, source: next.source, duration_minutes: next.duration_minutes, created_at: new Date().toISOString() } },
+    { $set: { habit_id: habitId, date, status, quantity: next.quantity, note: next.note, source: next.source, duration_minutes: next.duration_minutes, created_at: writtenAt } },
     { upsert: true }
   );
   await logEvent(existing ? "entry_updated" : "entry_set", habitId, date, { status, quantity: next.quantity, source: next.source });
-  const doc = await col.findOne({ habit_id: habitId, date });
-  return doc ? docToEntry(doc) : null;
+  return { habit_id: habitId, date, status, quantity: next.quantity, note: next.note, source: next.source, duration_minutes: next.duration_minutes, created_at: writtenAt };
 }
 
 // ── Context ───────────────────────────────────────────────────────────────────
@@ -768,8 +768,7 @@ export async function createExpense(input: {
     created_at: new Date().toISOString(),
   };
   const result = await db.collection("expenses").insertOne(doc);
-  const newDoc = await db.collection("expenses").findOne({ _id: result.insertedId });
-  return docToExpense(newDoc!);
+  return docToExpense({ _id: result.insertedId, ...doc });
 }
 
 export async function updateExpense(id: string, input: Partial<{
@@ -784,8 +783,9 @@ export async function updateExpense(id: string, input: Partial<{
   if (input.category !== undefined) update.category = input.category;
   if (input.note     !== undefined) update.note     = input.note;
   try {
-    await db.collection("expenses").updateOne({ _id: toOid(id) }, { $set: update });
-    const doc = await db.collection("expenses").findOne({ _id: toOid(id) });
+    const oid = toOid(id);
+    await db.collection("expenses").updateOne({ _id: oid }, { $set: update });
+    const doc = await db.collection("expenses").findOne({ _id: oid });
     return doc ? docToExpense(doc) : null;
   } catch { return null; }
 }
@@ -885,14 +885,15 @@ export async function createJob(input: Omit<Job, "id" | "created_at">): Promise<
   const db = await getDb();
   const doc = { ...input, created_at: new Date().toISOString() };
   const result = await db.collection("jobs").insertOne(doc);
-  return docToJob((await db.collection("jobs").findOne({ _id: result.insertedId }))!);
+  return docToJob({ _id: result.insertedId, ...doc });
 }
 
 export async function updateJob(id: string, input: Partial<Omit<Job, "id" | "created_at">>): Promise<Job | null> {
   const db = await getDb();
   try {
-    await db.collection("jobs").updateOne({ _id: toOid(id) }, { $set: input });
-    const doc = await db.collection("jobs").findOne({ _id: toOid(id) });
+    const oid = toOid(id);
+    await db.collection("jobs").updateOne({ _id: oid }, { $set: input });
+    const doc = await db.collection("jobs").findOne({ _id: oid });
     return doc ? docToJob(doc) : null;
   } catch { return null; }
 }

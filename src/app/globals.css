@@ -41,7 +41,22 @@ html.dark {
   --amber-soft:   #1a1200;
   --red-soft:     #1a0000;
   --bg-2:         #0a0a0a;
+  color-scheme: dark;
 }
+
+/* Force ALL native form elements to respect dark theme */
+html.dark input,
+html.dark select,
+html.dark textarea {
+  background: var(--card);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+html.dark input::placeholder,
+html.dark textarea::placeholder { color: var(--faint); }
+
+html.dark input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(1); }
 
 html.dark .heat-cell.h0 { background: #1a1a1a; }
 html.dark .heat-cell    { background: #333333; }
@@ -539,6 +554,28 @@ hr.div { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
 .exp-item-amount.debit { color: var(--red); }
 .exp-item-del { background: none; border: none; color: var(--faint); font-size: 16px; padding: 2px 4px; line-height: 1; }
 .exp-item-del:hover { color: var(--red); }
+.exp-item-edit { background: none; border: none; color: var(--faint); font-size: 13px; padding: 2px 4px; opacity: 0; transition: opacity 100ms; }
+.exp-item:hover .exp-item-edit { opacity: 1; }
+.exp-item-edit:hover { color: var(--accent); }
+
+/* Inline row edit */
+.exp-item.editing { flex-wrap: wrap; align-items: flex-start; gap: 6px; padding: 10px 12px; }
+.exp-inline-edit { display: flex; flex: 1; flex-wrap: wrap; gap: 5px; align-items: center; }
+.exp-inline-edit input,
+.exp-inline-edit select {
+  font-size: 12px; padding: 3px 7px;
+  border: 1px solid var(--border-strong); border-radius: 4px;
+  background: var(--bg); color: var(--text);
+}
+.exp-inline-edit input:focus,
+.exp-inline-edit select:focus { border-color: var(--accent); outline: none; }
+.exp-inline-edit .edit-name   { flex: 1; min-width: 120px; }
+.exp-inline-edit .edit-amount { width: 90px; text-align: right; }
+.exp-inline-edit .edit-date   { width: 132px; }
+.exp-inline-edit .edit-cat    { min-width: 110px; }
+.exp-inline-edit .edit-note   { flex: 1; min-width: 100px; }
+.exp-edit-err  { color: var(--red); font-size: 11px; width: 100%; margin: 0; }
+.exp-edit-btns { display: flex; gap: 4px; flex-shrink: 0; }
 
 /* Category breakdown */
 .cat-row { margin-bottom: 10px; }
