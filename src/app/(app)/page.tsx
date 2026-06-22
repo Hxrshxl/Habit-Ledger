@@ -16,6 +16,15 @@ import { jget, jsend } from "@/lib/client";
 const WD = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
 const CATS = ["General", "Learning", "Health", "Finance", "Routine"];
 
+// Returns how many sub-checkboxes a habit should show (0 = none).
+// DSA habits are excluded here — they use milestones instead.
+function habitSubCount(h: Habit): number {
+  if (/dsa/i.test(h.name)) return 0;
+  if (h.quantity_target > 1) return Math.min(h.quantity_target, 15);
+  const m = h.name.match(/\b([2-9]|1[0-5])\b/);
+  return m ? parseInt(m[1]) : 0;
+}
+
 function levelCls(r: number) {
   if (r >= 0.95) return "h4";
   if (r >= 0.7)  return "h3";
@@ -185,7 +194,7 @@ export default function Dashboard() {
   const today  = localToday();
   const yearAgo = fmt(addDays(parseDate(today), -365));
 
-  const { habits: allHabits, goals, milestones, appLoading, refresh: refreshData } = useAppData();
+  const { habits: allHabits, goals, milestones, setMilestones, appLoading, refresh: refreshData } = useAppData();
   const habits = allHabits.filter(h => !h.archived);
 
   const [entries,      setEntries]      = useState<Entry[]>([]);
@@ -254,6 +263,78 @@ export default function Dashboard() {
   );
 
   const [markingAll, setMarkingAll] = useState(false);
+
+  // Today's milestones (DSA problems scheduled for today)
+  const todayMs = useMemo(() => milestones.filter(m => m.target_date === today), [milestones, today]);
+
+  const [expandedHabits, setExpandedHabits] = useState<Set<string>>(new Set());
+  function toggleExpand(id: string) {
+    setExpandedHabits(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  // Per-habit sub-task completion stored in localStorage, keyed by habit+date.
+  const [subTasks, setSubTasks] = useState<Map<string, boolean[]>>(new Map());
+
+  useEffect(() => {
+    const init = new Map<string, boolean[]>();
+    for (const h of todayList) {
+      const n = habitSubCount(h);
+      if (n < 2) continue;
+      try {
+        const raw = localStorage.getItem(`hl_sub_${h.id}_${today}`);
+        init.set(h.id, raw ? JSON.parse(raw) : Array(n).fill(false));
+      } catch {
+        init.set(h.id, Array(n).fill(false));
+      }
+    }
+    setSubTasks(init);
+  }, [todayList, today]);
+
+  async function toggleSubTask(h: Habit, idx: number) {
+    const n = habitSubCount(h);
+    const current = subTasks.get(h.id) ?? Array(n).fill(false);
+    const updated = [...current];
+    updated[idx] = !updated[idx];
+    try { localStorage.setItem(`hl_sub_${h.id}_${today}`, JSON.stringify(updated)); } catch {}
+    setSubTasks(prev => new Map(prev).set(h.id, updated));
+    if (updated.every(Boolean) && emap.get(ekey(h.id, today))?.status !== "done") {
+      setEntries(prev => {
+        const rest = prev.filter(e => !(e.habit_id === h.id && e.date === today));
+        return [...rest, { habit_id: h.id, date: today, status: "done", quantity: n, note: null, source: "manual", duration_minutes: null, created_at: new Date().toISOString() }];
+      });
+      jsend("/api/entries/set", "POST", { habitId: h.id, date: today, status: "done", quantity: n }).catch(() => {});
+    }
+  }
+
+  async function toggleMilestone(ms: Milestone) {
+    const next = ms.status === "completed" ? "pending" : "completed";
+    const updatedMs = milestones.map(x => x.id === ms.id ? { ...x, status: next as Milestone["status"] } : x);
+    setMilestones(updatedMs);
+    try {
+      await jsend(`/api/milestones/${ms.id}`, "PATCH", { status: next });
+      // Auto-tick DSA habit when all today's problems are checked off
+      if (next === "completed") {
+        const todayMsUpdated = updatedMs.filter(m => m.target_date === today);
+        const allDone = todayMsUpdated.length > 0 && todayMsUpdated.every(m => m.status === "completed");
+        if (allDone) {
+          const dsaHabit = todayList.find(h => /dsa/i.test(h.name));
+          if (dsaHabit && emap.get(ekey(dsaHabit.id, today))?.status !== "done") {
+            setEntries(prev => {
+              const rest = prev.filter(e => !(e.habit_id === dsaHabit.id && e.date === today));
+              return [...rest, { habit_id: dsaHabit.id, date: today, status: "done", quantity: null, note: null, source: "manual", duration_minutes: null, created_at: new Date().toISOString() }];
+            });
+            jsend("/api/entries/set", "POST", { habitId: dsaHabit.id, date: today, status: "done", quantity: null }).catch(() => {});
+          }
+        }
+      }
+    } catch {
+      setMilestones(prev => prev.map(x => x.id === ms.id ? { ...x, status: ms.status } : x));
+    }
+  }
 
   // MITs
   const [mitIds, setMitIds] = useState<string[]>([]);
@@ -579,34 +660,85 @@ export default function Dashboard() {
               const e = emap.get(ekey(h.id, today));
               const s = streaks.get(h.id)!;
               const done = e?.status === "done";
+              // DSA habits: use database milestones with named problems
+              const habitMs = /dsa/i.test(h.name) ? todayMs : [];
+              // Other quantity habits: use local checkboxes (1, 2, 3…)
+              const subCount = habitSubCount(h);
+              const habitSubs = subCount > 0 ? (subTasks.get(h.id) ?? Array(subCount).fill(false)) : [];
+              const hasSubItems = habitMs.length > 0 || habitSubs.length > 0;
+              const subDone = habitMs.length > 0
+                ? habitMs.filter(m => m.status === "completed").length
+                : habitSubs.filter(Boolean).length;
+              const subTotal = habitMs.length > 0 ? habitMs.length : habitSubs.length;
               return (
-                <div
-                  key={h.id}
-                  className="spread"
-                  style={{
-                    padding: "6px 10px",
-                    border: "1px solid var(--border)",
-                    borderRadius: 6,
-                    background: done ? "var(--green-soft)" : undefined,
-                  }}
-                >
-                  <label className="row" style={{ gap: 8, cursor: "pointer", flex: 1, minWidth: 0 }}>
-                    <input
-                      type="checkbox"
-                      checked={done}
-                      onChange={() => quickToggle(h)}
-                      disabled={h.verify_type !== "manual"}
-                    />
-                    <span className="cat-dot" style={{ background: categoryColor(h.category), flexShrink: 0 }} />
-                    <span style={{ fontWeight: 500, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {h.name}
+                <div key={h.id}>
+                  <div
+                    className="spread"
+                    style={{
+                      padding: "6px 10px",
+                      border: "1px solid var(--border)",
+                      borderRadius: hasSubItems ? "6px 6px 0 0" : 6,
+                      background: done ? "var(--green-soft)" : undefined,
+                    }}
+                  >
+                    <label className="row" style={{ gap: 8, cursor: "pointer", flex: 1, minWidth: 0 }}>
+                      <input
+                        type="checkbox"
+                        checked={done}
+                        onChange={() => quickToggle(h)}
+                        disabled={h.verify_type !== "manual"}
+                      />
+                      <span className="cat-dot" style={{ background: categoryColor(h.category), flexShrink: 0 }} />
+                      <span style={{ fontWeight: 500, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {h.name}
+                      </span>
+                      {hasSubItems && (
+                        <span className="muted small" style={{ marginLeft: 4, flexShrink: 0 }}>
+                          {subDone}/{subTotal}
+                        </span>
+                      )}
+                    </label>
+                    <span className="row" style={{ gap: 5, flexShrink: 0 }}>
+                      {e?.status === "skipped" && <span className="pill amber">skip</span>}
+                      {e && ["leetcode","github"].includes(e.source) && <span className="pill green">✓</span>}
+                      {s.current >= 2 && <span className="pill">{s.current}{s.unit === "weeks" ? "w" : "d"}</span>}
+                      {hasSubItems && (
+                        <button
+                          onClick={() => toggleExpand(h.id)}
+                          style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 11, padding: "0 2px", lineHeight: 1 }}
+                        >
+                          {expandedHabits.has(h.id) ? "▲" : "▼"}
+                        </button>
+                      )}
                     </span>
-                  </label>
-                  <span className="row" style={{ gap: 5, flexShrink: 0 }}>
-                    {e?.status === "skipped" && <span className="pill amber">skip</span>}
-                    {e && ["leetcode","github"].includes(e.source) && <span className="pill green">✓</span>}
-                    {s.current >= 2 && <span className="pill">{s.current}{s.unit === "weeks" ? "w" : "d"}</span>}
-                  </span>
+                  </div>
+                  {hasSubItems && expandedHabits.has(h.id) && (
+                    <div style={{ border: "1px solid var(--border)", borderTop: "none", borderRadius: "0 0 6px 6px", padding: "4px 10px 6px 32px" }}>
+                      {habitMs.length > 0 ? (
+                        // DSA: named problems from milestones
+                        habitMs.map(ms => (
+                          <label key={ms.id} className="row" style={{ gap: 8, padding: "3px 0", cursor: "pointer" }}>
+                            <input type="checkbox" checked={ms.status === "completed"} onChange={() => toggleMilestone(ms)} />
+                            <span style={{ fontSize: 12, flex: 1, textDecoration: ms.status === "completed" ? "line-through" : undefined, color: ms.status === "completed" ? "var(--muted)" : undefined }}>
+                              {ms.title}
+                            </span>
+                          </label>
+                        ))
+                      ) : (
+                        // Quantity habits: numbered checkboxes
+                        <div className="row" style={{ gap: 8, flexWrap: "wrap", paddingTop: 2 }}>
+                          {habitSubs.map((checked, idx) => (
+                            <label key={idx} className="row" style={{ gap: 4, cursor: "pointer", padding: "3px 8px", borderRadius: 4, border: "1px solid var(--border)", background: checked ? "var(--green-soft)" : undefined }}>
+                              <input type="checkbox" checked={checked} onChange={() => toggleSubTask(h, idx)} style={{ width: 13, height: 13 }} />
+                              <span style={{ fontSize: 11, fontWeight: 500, color: checked ? "var(--muted)" : undefined, textDecoration: checked ? "line-through" : undefined }}>
+                                {idx + 1}
+                            </span>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}

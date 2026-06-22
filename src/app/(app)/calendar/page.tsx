@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAppData } from "@/components/AppDataProvider";
 import { buildEntryMap, ekey, isScheduled, localToday, parseDate, fmt, addDays } from "@/lib/core";
-import type { Entry, ContextDay } from "@/lib/core";
-import { jget } from "@/lib/client";
+import type { Entry, ContextDay, Milestone } from "@/lib/core";
+import { jget, jsend } from "@/lib/client";
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const WD = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
@@ -40,7 +40,7 @@ export default function CalendarPage() {
   const [contexts, setContexts] = useState<ContextDay[]>([]);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const { habits } = useAppData();
+  const { habits, milestones, setMilestones } = useAppData();
 
   const { from, to } = useMemo(() => monthBounds(year, month0), [year, month0]);
 
@@ -63,6 +63,27 @@ export default function CalendarPage() {
     for (const c of contexts) m.set(c.date, c);
     return m;
   }, [contexts]);
+
+  // Milestones (e.g. the imported DSA plan) grouped by their target date.
+  const msByDate = useMemo(() => {
+    const m = new Map<string, Milestone[]>();
+    for (const ms of milestones) {
+      if (!ms.target_date) continue;
+      const arr = m.get(ms.target_date);
+      if (arr) arr.push(ms); else m.set(ms.target_date, [ms]);
+    }
+    return m;
+  }, [milestones]);
+
+  async function toggleMilestone(ms: Milestone) {
+    const next = ms.status === "completed" ? "pending" : "completed";
+    setMilestones(prev => prev.map(x => x.id === ms.id ? { ...x, status: next as Milestone["status"] } : x));
+    try {
+      await jsend(`/api/milestones/${ms.id}`, "PATCH", { status: next });
+    } catch {
+      setMilestones(prev => prev.map(x => x.id === ms.id ? { ...x, status: ms.status } : x));
+    }
+  }
 
   function prevMonth() { if (month0 === 0) { setMonth0(11); setYear(y => y - 1); } else setMonth0(m => m - 1); }
   function nextMonth() { if (month0 === 11) { setMonth0(0); setYear(y => y + 1); } else setMonth0(m => m + 1); }
@@ -118,22 +139,26 @@ export default function CalendarPage() {
           const stats = !isFuture ? dayStats(date) : null;
           const ctx = ctxMap.get(date);
           const isSelected = date === selectedDay;
+          const dayMs = msByDate.get(date) ?? [];
+          const hasMs = dayMs.length > 0;
+          const msDone = dayMs.filter(m => m.status === "completed").length;
+          const selectable = !isFuture || hasMs;
 
           return (
             <div
               key={date}
-              onClick={() => !isFuture && setSelectedDay(isSelected ? null : date)}
+              onClick={() => selectable && setSelectedDay(isSelected ? null : date)}
               style={{
                 borderRadius: "var(--radius-sm)",
                 border: `2px solid ${isSelected ? "var(--accent)" : isToday ? "var(--accent)" : stats ? cellBorder(stats.pct) : "var(--border)"}`,
                 background: isFuture ? "transparent" : stats ? cellColor(stats.pct) : "transparent",
                 padding: "6px 4px",
-                cursor: isFuture ? "default" : "pointer",
+                cursor: selectable ? "pointer" : "default",
                 minHeight: 56,
-                opacity: isFuture ? 0.35 : 1,
+                opacity: selectable ? 1 : 0.35,
                 transition: "box-shadow 0.1s",
               }}
-              onMouseEnter={e => { if (!isFuture) e.currentTarget.style.boxShadow = "0 0 0 2px var(--accent)"; }}
+              onMouseEnter={e => { if (selectable) e.currentTarget.style.boxShadow = "0 0 0 2px var(--accent)"; }}
               onMouseLeave={e => { e.currentTarget.style.boxShadow = "none"; }}
             >
               <div style={{ fontSize: 12, fontWeight: isToday ? 700 : 500, color: isToday ? "var(--accent)" : "var(--text)", textAlign: "right", marginBottom: 4 }}>
@@ -142,6 +167,11 @@ export default function CalendarPage() {
               {stats && stats.effective > 0 && (
                 <div style={{ fontSize: 10, color: "var(--muted)", textAlign: "center" }}>
                   {stats.done.length}/{stats.effective}
+                </div>
+              )}
+              {hasMs && (
+                <div style={{ fontSize: 10, textAlign: "center", marginTop: 2, color: "var(--accent)", fontWeight: 600 }}>
+                  📝 {msDone}/{dayMs.length}
                 </div>
               )}
               {ctx && (ctx.mood || ctx.energy) && (
@@ -221,8 +251,32 @@ export default function CalendarPage() {
             )}
           </div>
 
-          {selStats.effective === 0 && (
-            <div className="state-note">No habits scheduled for this day.</div>
+          {/* DSA problems for this day */}
+          {(() => {
+            const dayMs = msByDate.get(selectedDay) ?? [];
+            if (dayMs.length === 0) return null;
+            const done = dayMs.filter(m => m.status === "completed").length;
+            return (
+              <div style={{ marginTop: 8 }}>
+                <div className="stat-label" style={{ color: "var(--accent)", marginBottom: 6 }}>
+                  📝 DSA Problems ({done}/{dayMs.length} done)
+                </div>
+                <div className="stack" style={{ gap: 4 }}>
+                  {dayMs.map(ms => (
+                    <label key={ms.id} className="row" style={{ gap: 8, padding: "4px 6px", borderRadius: 4, cursor: "pointer", background: ms.status === "completed" ? "var(--green-soft)" : undefined }}>
+                      <input type="checkbox" checked={ms.status === "completed"} onChange={() => toggleMilestone(ms)} />
+                      <span style={{ fontSize: 12, flex: 1, textDecoration: ms.status === "completed" ? "line-through" : undefined, color: ms.status === "completed" ? "var(--muted)" : undefined }}>
+                        {ms.title}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+
+          {selStats.effective === 0 && (msByDate.get(selectedDay) ?? []).length === 0 && (
+            <div className="state-note">No habits or problems scheduled for this day.</div>
           )}
         </div>
       )}
