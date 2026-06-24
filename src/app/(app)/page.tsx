@@ -4,7 +4,7 @@ import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { useAppData } from "@/components/AppDataProvider";
 import Link from "next/link";
 import {
-  Habit, Entry, Goal, Milestone, WeeklyReview, buildEntryMap, ekey, isScheduled, localToday,
+  Habit, Entry, Goal, Milestone, Todo, WeeklyReview, buildEntryMap, ekey, isScheduled, localToday,
   computeStreakBatch, statForRange, monthRange, weeklyTrend, computeBadges,
   fmt, addDays, parseDate, categoryColor, gradeOf, StreakInfo, eachDay, weekdayOf, weekKey,
   goalProgress, goalHealth, GoalHealth,
@@ -208,6 +208,34 @@ export default function Dashboard() {
   const [af,      setAf]      = useState<AddForm>(blankForm());
   const [addErr,  setAddErr]  = useState("");
   const [addOk,   setAddOk]   = useState("");
+
+  // todos
+  const [todos,       setTodos]       = useState<Todo[]>([]);
+  const [showAddTodo, setShowAddTodo] = useState(false);
+  const [todoTitle,   setTodoTitle]   = useState("");
+  const [todoDue,     setTodoDue]     = useState("");
+
+  useEffect(() => {
+    jget<Todo[]>("/api/todos").then(t => setTodos(t ?? [])).catch(() => {});
+  }, []);
+
+  async function addTodo() {
+    if (!todoTitle.trim()) return;
+    const t = await jsend<Todo>("/api/todos", "POST", { title: todoTitle.trim(), due_date: todoDue || null });
+    if (t) setTodos(prev => [...prev, t]);
+    setTodoTitle(""); setTodoDue(""); setShowAddTodo(false);
+  }
+
+  async function toggleTodo(todo: Todo) {
+    const next = todo.status === "completed" ? "pending" : "completed";
+    setTodos(prev => prev.map(t => t.id === todo.id ? { ...t, status: next } : t));
+    await jsend(`/api/todos/${todo.id}`, "PATCH", { status: next });
+  }
+
+  async function removeTodo(id: string) {
+    setTodos(prev => prev.filter(t => t.id !== id));
+    await jsend(`/api/todos/${id}`, "DELETE", {});
+  }
 
   const load = useCallback(async () => {
     setEntriesLoading(true); setErr("");
@@ -486,9 +514,15 @@ export default function Dashboard() {
           {addOk && <span className="ok-text" style={{ margin: 0 }}>{addOk}</span>}
           <button
             className={showAdd ? "btn btn-sm" : "btn btn-sm btn-primary"}
-            onClick={() => { setShowAdd(!showAdd); setAddErr(""); }}
+            onClick={() => { setShowAdd(s => !s); setShowAddTodo(false); setAddErr(""); }}
           >
-            {showAdd ? "Cancel" : "+ Add habit"}
+            {showAdd ? "Cancel" : "+ Habit"}
+          </button>
+          <button
+            className={showAddTodo ? "btn btn-sm" : "btn btn-sm btn-primary"}
+            onClick={() => { setShowAddTodo(s => !s); setShowAdd(false); }}
+          >
+            {showAddTodo ? "Cancel" : "+ To-do"}
           </button>
           <Link href="/tracker" className="btn btn-sm" style={{ textDecoration: "none" }}>
             Open tracker
@@ -575,6 +609,39 @@ export default function Dashboard() {
               <button className="btn btn-sm" onClick={() => { setShowAdd(false); setAf(blankForm()); setAddErr(""); }}>Cancel</button>
             </div>
             {addErr && <span className="error-text" style={{ margin: 0 }}>{addErr}</span>}
+          </div>
+        </div>
+      )}
+
+      {/* ── Add To-do panel ── */}
+      {showAddTodo && (
+        <div className="card section">
+          <div className="section-title">New to-do</div>
+          <div className="form-row" style={{ alignItems: "end" }}>
+            <label className="field" style={{ flex: "2 1 200px" }}>
+              <span className="label">What do you need to do?</span>
+              <input
+                className="input"
+                placeholder="e.g. Update resume, Send follow-up email"
+                value={todoTitle}
+                autoFocus
+                onChange={e => setTodoTitle(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") addTodo(); }}
+              />
+            </label>
+            <label className="field" style={{ maxWidth: 180 }}>
+              <span className="label">Due date (optional)</span>
+              <input
+                className="input"
+                type="date"
+                value={todoDue}
+                onChange={e => setTodoDue(e.target.value)}
+              />
+            </label>
+            <div style={{ display: "flex", gap: 8, paddingBottom: 1 }}>
+              <button className="btn btn-primary btn-sm" onClick={addTodo}>Save</button>
+              <button className="btn btn-sm" onClick={() => { setShowAddTodo(false); setTodoTitle(""); setTodoDue(""); }}>Cancel</button>
+            </div>
           </div>
         </div>
       )}
@@ -745,6 +812,58 @@ export default function Dashboard() {
           </div>
 
         </div>
+
+        {/* To-Dos card */}
+        {(() => {
+          const pending = todos.filter(t => t.status === "pending");
+          const done    = todos.filter(t => t.status === "completed");
+          const overdue = pending.filter(t => t.due_date && t.due_date < today);
+          const dueToday = pending.filter(t => t.due_date === today);
+          const upcoming = pending.filter(t => t.due_date && t.due_date > today);
+          const noDate   = pending.filter(t => !t.due_date);
+          const groups = [
+            { label: "Overdue", items: overdue, color: "var(--red)" },
+            { label: "Today", items: dueToday, color: "var(--accent)" },
+            { label: "Upcoming", items: upcoming, color: "var(--muted)" },
+            { label: "No date", items: noDate, color: "var(--faint)" },
+          ].filter(g => g.items.length > 0);
+          if (todos.length === 0) return (
+            <div className="card stack">
+              <div className="spread"><h3 style={{ margin: 0 }}>To-Dos</h3></div>
+              <div className="muted small">No to-dos yet. Hit "+ To-do" to add one.</div>
+            </div>
+          );
+          return (
+            <div className="card stack">
+              <h3 style={{ margin: 0 }}>To-Dos {pending.length > 0 && <span className="muted" style={{ fontWeight: 400, fontSize: 13 }}>({pending.length} pending)</span>}</h3>
+              {groups.map(g => (
+                <div key={g.label}>
+                  <div className="stat-label" style={{ color: g.color, marginBottom: 4 }}>{g.label}</div>
+                  {g.items.map(t => (
+                    <div key={t.id} className="spread" style={{ padding: "5px 0", borderBottom: "1px solid var(--border)" }}>
+                      <label className="row" style={{ gap: 8, cursor: "pointer", flex: 1 }}>
+                        <input type="checkbox" checked={false} onChange={() => toggleTodo(t)} />
+                        <span style={{ fontSize: 13 }}>{t.title}</span>
+                        {t.due_date && <span className="muted small" style={{ marginLeft: 4 }}>{t.due_date}</span>}
+                      </label>
+                      <button onClick={() => removeTodo(t.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--faint)", fontSize: 14, padding: "0 4px" }} title="Delete">×</button>
+                    </div>
+                  ))}
+                </div>
+              ))}
+              {done.length > 0 && (
+                <div className="muted small" style={{ marginTop: 4 }}>✓ {done.length} completed
+                  {done.slice(0, 3).map(t => (
+                    <span key={t.id} style={{ marginLeft: 8, textDecoration: "line-through" }}>
+                      {t.title}
+                      <button onClick={() => removeTodo(t.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--faint)", fontSize: 12, padding: "0 2px" }}>×</button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Right — Heatmap + Trend + Goals */}
         <div className="stack">

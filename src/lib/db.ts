@@ -1,6 +1,6 @@
 import { MongoClient, Db, ObjectId, Document } from "mongodb";
 import crypto from "crypto";
-import type { Habit, Entry, ContextDay, Goal, Milestone, Experiment, WeeklyReview } from "./core";
+import type { Habit, Entry, ContextDay, Goal, Milestone, Experiment, WeeklyReview, Todo } from "./core";
 
 // ── Singleton (survives Next.js hot-reload in dev) ───────────────────────────
 declare global {
@@ -921,4 +921,47 @@ export async function setMits(date: string, mitIds: string[]): Promise<void> {
     { $set: { date, mit_ids: mitIds.slice(0, 3) } },
     { upsert: true }
   );
+}
+
+// ── Todos ─────────────────────────────────────────────────────────────────────
+
+function docToTodo(doc: Document): Todo {
+  const { _id, ...rest } = doc;
+  return { id: (_id as ObjectId).toString(), ...rest } as Todo;
+}
+
+export async function listTodos(): Promise<Todo[]> {
+  const db = await getDb();
+  const docs = await db.collection("todos")
+    .find({})
+    .sort({ due_date: 1, _id: -1 })
+    .toArray();
+  return docs.map(docToTodo);
+}
+
+export async function createTodo(title: string, due_date: string | null): Promise<Todo> {
+  const db = await getDb();
+  const doc = { title, due_date: due_date ?? null, status: "pending", created_at: new Date().toISOString() };
+  const result = await db.collection("todos").insertOne(doc);
+  return docToTodo({ _id: result.insertedId, ...doc });
+}
+
+export async function updateTodo(id: string, fields: { status?: string; title?: string; due_date?: string | null }): Promise<Todo | null> {
+  const db = await getDb();
+  try {
+    const oid = toOid(id);
+    const update: Record<string, unknown> = {};
+    if (fields.status    !== undefined) update.status    = fields.status;
+    if (fields.title     !== undefined) update.title     = fields.title;
+    if (fields.due_date  !== undefined) update.due_date  = fields.due_date;
+    if (Object.keys(update).length === 0) return null;
+    await db.collection("todos").updateOne({ _id: oid }, { $set: update });
+    const doc = await db.collection("todos").findOne({ _id: oid });
+    return doc ? docToTodo(doc) : null;
+  } catch { return null; }
+}
+
+export async function deleteTodo(id: string): Promise<void> {
+  const db = await getDb();
+  try { await db.collection("todos").deleteOne({ _id: toOid(id) }); } catch {}
 }

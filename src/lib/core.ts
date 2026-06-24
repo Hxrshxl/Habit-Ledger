@@ -47,6 +47,14 @@ export interface ContextDay {
   notes: string | null;
 }
 
+export interface Todo {
+  id: string;
+  title: string;
+  due_date: string | null;  // YYYY-MM-DD
+  status: "pending" | "completed";
+  created_at: string;
+}
+
 export type GoalStatus       = "active" | "completed" | "paused" | "stalled";
 export type GoalPriority     = "low" | "medium" | "high";
 export type GoalTimeframe    = "3m" | "6m" | "1y" | "3y" | "5y" | "custom";
