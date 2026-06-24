@@ -340,6 +340,79 @@ export function* eachDay(from: string, to: string): Generator<string> {
   }
 }
 
+// ---------------- DSA carry-forward ----------------
+
+/**
+ * Simulates the rolling schedule from the first plan date to `today`.
+ * Each day's capacity = its original milestone count.
+ * Carry-overs fill capacity first; leftover originals spill to the next day.
+ * On weekends (Sat/Sun) total effective list is capped at 12.
+ */
+export function computeEffectiveDay(milestones: Milestone[], today: string): Milestone[] {
+  const planMs = milestones
+    .filter(m => m.target_date !== null)
+    .sort((a, b) => (a.target_date!).localeCompare(b.target_date!) || a.order_index - b.order_index);
+
+  if (planMs.length === 0) return [];
+  const firstDate = planMs[0].target_date!;
+  if (firstDate > today) return [];
+
+  const byDate = new Map<string, Milestone[]>();
+  for (const m of planMs) {
+    const arr = byDate.get(m.target_date!);
+    if (arr) arr.push(m); else byDate.set(m.target_date!, [m]);
+  }
+
+  let carry: Milestone[] = [];
+  let result: Milestone[] = [];
+
+  for (const date of eachDay(firstDate, today)) {
+    const orig = byDate.get(date) ?? [];
+    const cap = orig.length;
+    const pendingCarry = carry.filter(m => m.status !== "completed");
+    const slotsForNew = Math.max(0, cap - pendingCarry.length);
+    const shownFromOrig = orig.slice(0, slotsForNew);
+    const overflow = orig.slice(slotsForNew);
+
+    if (date === today) {
+      const dow = weekdayOf(today);
+      const isWeekend = dow === 0 || dow === 6;
+      const effective = [
+        ...pendingCarry,
+        ...shownFromOrig.filter(m => m.status !== "completed"),
+      ];
+      result = isWeekend ? effective.slice(0, 12) : effective;
+      break;
+    }
+
+    carry = [
+      ...pendingCarry.filter(m => m.status !== "completed"),
+      ...overflow.filter(m => m.status !== "completed"),
+    ];
+  }
+
+  return result;
+}
+
+/**
+ * Returns how many problems are behind schedule and an estimated days-behind count.
+ * "Behind" = pending milestones whose original target_date is before today.
+ */
+export function computeDSABacklog(milestones: Milestone[], today: string): {
+  pendingCount: number;
+  daysBack: number;
+  oldestDate: string | null;
+} {
+  const past = milestones.filter(
+    m => m.status !== "completed" && m.target_date !== null && m.target_date < today
+  );
+  const oldestDate = past.length > 0
+    ? past.reduce((min, m) => (m.target_date! < min ? m.target_date! : min), past[0].target_date!)
+    : null;
+  const daysBack = Math.ceil(past.length / 4.7); // 407 problems / 87 days ≈ 4.7/day
+  return { pendingCount: past.length, daysBack, oldestDate };
+}
+
 // ---------------- Scheduling ----------------
 
 // Fixed epoch used as reference for interval scheduling

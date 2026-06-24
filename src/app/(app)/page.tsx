@@ -7,7 +7,7 @@ import {
   Habit, Entry, Goal, Milestone, Todo, WeeklyReview, buildEntryMap, ekey, isScheduled, localToday,
   computeStreakBatch, statForRange, monthRange, weeklyTrend, computeBadges,
   fmt, addDays, parseDate, categoryColor, gradeOf, StreakInfo, eachDay, weekdayOf, weekKey,
-  goalProgress, goalHealth, GoalHealth,
+  goalProgress, goalHealth, GoalHealth, computeEffectiveDay, computeDSABacklog,
 } from "@/lib/core";
 import { jget, jsend } from "@/lib/client";
 
@@ -293,7 +293,7 @@ export default function Dashboard() {
   const [markingAll, setMarkingAll] = useState(false);
 
   // Today's milestones (DSA problems scheduled for today)
-  const todayMs = useMemo(() => milestones.filter(m => m.target_date === today), [milestones, today]);
+  const todayMs = useMemo(() => computeEffectiveDay(milestones, today), [milestones, today]);
 
   const [expandedHabits, setExpandedHabits] = useState<Set<string>>(new Set());
   function toggleExpand(id: string) {
@@ -346,7 +346,7 @@ export default function Dashboard() {
       await jsend(`/api/milestones/${ms.id}`, "PATCH", { status: next });
       // Auto-tick DSA habit when all today's problems are checked off
       if (next === "completed") {
-        const todayMsUpdated = updatedMs.filter(m => m.target_date === today);
+        const todayMsUpdated = computeEffectiveDay(updatedMs, today);
         const allDone = todayMsUpdated.length > 0 && todayMsUpdated.every(m => m.status === "completed");
         if (allDone) {
           const dsaHabit = todayList.find(h => /dsa/i.test(h.name));
@@ -920,6 +920,28 @@ export default function Dashboard() {
               </div>
             )}
           </div>
+
+          {/* DSA backlog indicator */}
+          {(() => {
+            const { pendingCount, daysBack, oldestDate } = computeDSABacklog(milestones, today);
+            if (pendingCount === 0) return null;
+            return (
+              <div className="card" style={{ border: "1px solid var(--amber)", background: "var(--amber-soft)" }}>
+                <div className="spread">
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>📉 DSA Backlog</div>
+                    <div className="muted small" style={{ marginTop: 2 }}>
+                      {pendingCount} problem{pendingCount !== 1 ? "s" : ""} pending
+                      {oldestDate && <> · since {oldestDate}</>}
+                    </div>
+                  </div>
+                  <span className="pill red" style={{ fontSize: 13, fontWeight: 700, flexShrink: 0 }}>
+                    {daysBack} day{daysBack !== 1 ? "s" : ""} behind
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Upcoming milestones */}
           {(() => {

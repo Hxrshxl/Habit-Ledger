@@ -275,6 +275,33 @@ export default function CalendarPage() {
             );
           })()}
 
+          {/* Carried-over problems: pending milestones from before the selected day */}
+          {selectedDay >= today && (() => {
+            const carriedOver = milestones.filter(
+              m => m.status !== "completed" && m.target_date !== null && m.target_date < selectedDay
+            );
+            if (carriedOver.length === 0) return null;
+            return (
+              <div style={{ marginTop: 8 }}>
+                <div className="stat-label" style={{ color: "var(--amber)", marginBottom: 6 }}>
+                  ⏪ Carried over ({carriedOver.length} from earlier)
+                </div>
+                <div className="stack" style={{ gap: 4 }}>
+                  {carriedOver.slice(0, 10).map(ms => (
+                    <label key={ms.id} className="row" style={{ gap: 8, padding: "4px 6px", borderRadius: 4, cursor: "pointer" }}>
+                      <input type="checkbox" checked={ms.status === "completed"} onChange={() => toggleMilestone(ms)} />
+                      <span style={{ fontSize: 10, color: "var(--faint)", flexShrink: 0 }}>{ms.target_date}</span>
+                      <span style={{ fontSize: 12, flex: 1 }}>{ms.title}</span>
+                    </label>
+                  ))}
+                  {carriedOver.length > 10 && (
+                    <div className="muted small">+{carriedOver.length - 10} more</div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
           {selStats.effective === 0 && (msByDate.get(selectedDay) ?? []).length === 0 && (
             <div className="state-note">No habits or problems scheduled for this day.</div>
           )}
